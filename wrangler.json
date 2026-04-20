@@ -1,0 +1,16 @@
+{
+	"compatibility_date": "2025-10-08",
+	"main": "src/index.ts",
+	"name": "d1-todolist",
+	"upload_source_maps": true,
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_id": "b45375d0-6c7c-44c4-aaa8-bdf07941c220",
+			"database_name": "d1-todolist"
+		}
+	],
+	"observability": {
+		"enabled": true
+	}
+}
