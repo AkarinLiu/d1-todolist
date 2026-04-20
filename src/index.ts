@@ -282,7 +282,7 @@ async function handleOAuthAuthorize(request: Request, env: Env, provider: string
 		status: 302,
 		headers: {
 			Location: authUrl,
-			"Set-Cookie": `oauth_state=${state}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${60 * 10}`,
+			"Set-Cookie": `oauth_state=${state}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${60 * 10}`,
 		},
 	});
 
