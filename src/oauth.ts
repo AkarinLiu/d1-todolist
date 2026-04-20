@@ -109,7 +109,12 @@ export async function exchangeCodeForToken(provider: OAuthProvider, config: OAut
 		throw new Error(`Token exchange failed: ${(data as Record<string, string>).error_description || (data as Record<string, string>).error || "Unknown error"}`);
 	}
 
-	return (data as Record<string, string>).access_token;
+	const accessToken = (data as Record<string, string>).access_token;
+	if (!accessToken) {
+		throw new Error(`Token exchange succeeded but no access_token returned. Response: ${JSON.stringify(data)}`);
+	}
+
+	return accessToken;
 }
 
 export async function fetchUserInfo(provider: OAuthProvider, accessToken: string, config?: OAuthConfig): Promise<OAuthUserInfo> {
@@ -175,7 +180,10 @@ async function fetchGitHubUser(accessToken: string): Promise<OAuthUserInfo> {
 	const res = await fetch("https://api.github.com/user", {
 		headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/vnd.github.v3+json" },
 	});
-	if (!res.ok) throw new Error("Failed to fetch GitHub user");
+	if (!res.ok) {
+		const body = await res.text();
+		throw new Error(`Failed to fetch GitHub user (HTTP ${res.status}): ${body}`);
+	}
 	const user = (await res.json()) as Record<string, unknown>;
 
 	let email = (user.email as string) || null;
