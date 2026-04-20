@@ -1,14 +1,696 @@
-import { renderHtml } from "./renderHtml";
+import { renderHtml, renderAuthPage, renderPublicPage, renderAdminPage, renderSettingsPage, renderProfilePage, renderSetupPage } from "./renderHtml";
+import { verifyPassword, generateSessionToken } from "./auth";
+import { sendEmail, getSetting, setSetting } from "./email";
+import { getOAuthConfig, getAuthorizationUrl, exchangeCodeForToken, fetchUserInfo, OAUTH_PROVIDERS, OAuthProvider } from "./oauth";
+
+async function getEnabledOAuthProviders(env: Env): Promise<Array<{ key: string; name: string; icon: string }>> {
+	const providers: Array<{ key: string; name: string; icon: string }> = [];
+	for (const [key, info] of Object.entries(OAUTH_PROVIDERS)) {
+		const clientId = await getSetting(env, `oauth_${key}_client_id`);
+		const clientSecret = await getSetting(env, `oauth_${key}_client_secret`);
+		if (clientId && clientSecret) {
+			providers.push({ key, name: info.name, icon: info.icon });
+		}
+	}
+	return providers;
+}
 
 export default {
 	async fetch(request, env) {
-		const stmt = env.DB.prepare("SELECT * FROM comments LIMIT 3");
-		const { results } = await stmt.all();
+		const url = new URL(request.url);
+		const path = url.pathname;
+		const method = request.method;
+		const sessionToken = getSessionToken(request);
 
-		return new Response(renderHtml(JSON.stringify(results, null, 2)), {
-			headers: {
-				"content-type": "text/html",
-			},
-		});
+		const user = sessionToken ? await getUserBySession(env, sessionToken) : null;
+
+		if (path === "/" && method === "GET") {
+			if (user) {
+				return new Response(renderHtml(user.username, user.isAdmin), {
+					headers: { "content-type": "text/html" },
+				});
+			}
+			const userCount = await env.DB.prepare("SELECT COUNT(*) as count FROM users").first() as Record<string, number>;
+			const hasUsers = (userCount?.count ?? 0) > 0;
+			const oauthProviders = await getEnabledOAuthProviders(env);
+			if (!hasUsers && oauthProviders.length === 0) {
+				return new Response(renderSetupPage(), {
+					headers: { "content-type": "text/html" },
+				});
+			}
+			return new Response(renderAuthPage(oauthProviders), {
+				headers: { "content-type": "text/html" },
+			});
+		}
+
+		if (path === "/setup" && method === "GET") {
+			const userCount = await env.DB.prepare("SELECT COUNT(*) as count FROM users").first() as Record<string, number>;
+			const hasUsers = (userCount?.count ?? 0) > 0;
+			if (hasUsers) {
+				return new Response("Setup already completed", { status: 403 });
+			}
+			return new Response(renderSetupPage(), {
+				headers: { "content-type": "text/html" },
+			});
+		}
+
+		if (path === "/admin" && method === "GET") {
+			if (!user?.isAdmin) return new Response("Forbidden", { status: 403 });
+			return new Response(renderAdminPage(user.username), {
+				headers: { "content-type": "text/html" },
+			});
+		}
+
+		if (path === "/admin/settings" && method === "GET") {
+			if (!user?.isAdmin) return new Response("Forbidden", { status: 403 });
+			return new Response(renderSettingsPage(user.username), {
+				headers: { "content-type": "text/html" },
+			});
+		}
+
+		if (path === "/profile" && method === "GET") {
+			if (!user) return new Response("Unauthorized", { status: 401 });
+			const profile = await env.DB.prepare("SELECT email, email_verified FROM users WHERE id = ?").bind(user.id).first() as Record<string, string | number> | null;
+			return new Response(renderProfilePage(user.username, profile?.email as string | null, Number(profile?.email_verified) === 1), {
+				headers: { "content-type": "text/html" },
+			});
+		}
+
+		const publicMatch = path.match(/^\/public\/([^/]+)$/);
+		if (publicMatch && method === "GET") {
+			return new Response(renderPublicPage(publicMatch[1]), {
+				headers: { "content-type": "text/html" },
+			});
+		}
+
+		if (path === "/api/setup/configure-oauth" && method === "POST") {
+			return handleSetupOAuth(request, env);
+		}
+
+		if (path === "/api/auth/login" && method === "POST") {
+			return handleLogin(request, env);
+		}
+
+		const oauthAuthorizeMatch = path.match(/^\/api\/auth\/oauth\/authorize\/([^/]+)$/);
+		if (oauthAuthorizeMatch && method === "GET") {
+			return handleOAuthAuthorize(request, env, oauthAuthorizeMatch[1] as OAuthProvider);
+		}
+
+		const oauthCallbackMatch = path.match(/^\/api\/auth\/oauth\/callback\/([^/]+)$/);
+		if (oauthCallbackMatch && method === "GET") {
+			return handleOAuthCallback(request, env, oauthCallbackMatch[1] as OAuthProvider);
+		}
+
+		if (path === "/api/auth/logout" && method === "POST") {
+			return handleLogout(env, sessionToken);
+		}
+
+		if (!user) {
+			return jsonError("Unauthorized", 401);
+		}
+
+		if (path.startsWith("/api/admin") && !user.isAdmin) {
+			return jsonError("Forbidden", 403);
+		}
+
+		if (path === "/api/admin/users" && method === "GET") {
+			return handleGetUsers(env);
+		}
+
+		if (path === "/api/admin/users/delete" && method === "POST") {
+			return handleDeleteUser(request, env);
+		}
+
+		if (path === "/api/admin/users/toggle-admin" && method === "PUT") {
+			return handleToggleAdmin(request, env);
+		}
+
+		if (path === "/api/admin/settings" && method === "GET") {
+			return handleGetSettings(env);
+		}
+
+		if (path === "/api/admin/settings" && method === "PUT") {
+			return handleUpdateSettings(request, env);
+		}
+
+		if (path === "/api/admin/settings/smtp-test" && method === "POST") {
+			return handleTestSmtp(request, env);
+		}
+
+		if (path === "/api/email/send-code" && method === "POST") {
+			return handleSendEmailCode(request, env, user?.id ?? 0);
+		}
+
+		if (path === "/api/email/verify" && method === "POST") {
+			return handleVerifyEmailCode(request, env, user?.id ?? 0);
+		}
+
+		if (path === "/api/todos") {
+			if (method === "GET") {
+				return handleGetTodos(env, user.id);
+			}
+			if (method === "POST") {
+				return handleCreateTodo(request, env, user.id);
+			}
+		}
+
+		if (path === "/api/todos/toggle-public" && method === "PUT") {
+			return handleTogglePublic(request, env, user.id);
+		}
+
+		const todoIdMatch = path.match(/^\/api\/todos\/(\d+)$/);
+		if (todoIdMatch) {
+			const id = parseInt(todoIdMatch[1], 10);
+			if (method === "PUT") {
+				return handleUpdateTodo(request, env, user.id, id);
+			}
+			if (method === "DELETE") {
+				return handleDeleteTodo(env, user.id, id);
+			}
+		}
+
+		if (path === "/api/public/todos" && method === "GET") {
+			const username = url.searchParams.get("username");
+			if (!username) return jsonError("Username required", 400);
+			return handleGetPublicTodos(env, username);
+		}
+
+		return new Response("Not Found", { status: 404 });
 	},
 } satisfies ExportedHandler<Env>;
+
+function getSessionToken(request: Request): string | null {
+	const cookie = request.headers.get("Cookie");
+	if (!cookie) return null;
+	const match = cookie.match(/session=([^;]+)/);
+	return match ? match[1] : null;
+}
+
+async function getUserBySession(env: Env, token: string) {
+	const row = await env.DB.prepare("SELECT id, username, is_admin FROM users WHERE session_token = ?").bind(token).first() as Record<string, string | number> | null;
+	return row ? { id: Number(row.id), username: row.username as string, isAdmin: Number(row.is_admin) === 1 } : null;
+}
+
+async function handleSetupOAuth(request: Request, env: Env) {
+	try {
+		const userCount = await env.DB.prepare("SELECT COUNT(*) as count FROM users").first() as Record<string, number>;
+		if ((userCount?.count ?? 0) > 0) {
+			return jsonError("Setup already completed", 403);
+		}
+
+		const body = await request.json<Record<string, string>>();
+		const providers = ["casdoor", "github", "gitee", "cloudflare", "microsoft", "google"];
+		const extraFields: Record<string, string[]> = {
+			casdoor: ["server_url"],
+			microsoft: ["tenant"],
+		};
+
+		let configured = 0;
+		for (const provider of providers) {
+			const clientId = body[`oauth_${provider}_client_id`]?.trim();
+			const clientSecret = body[`oauth_${provider}_client_secret`]?.trim();
+			if (clientId && clientSecret) {
+				await setSetting(env, `oauth_${provider}_client_id`, clientId);
+				await setSetting(env, `oauth_${provider}_client_secret`, clientSecret);
+				const redirectUri = body[`oauth_${provider}_redirect_uri`]?.trim();
+				if (redirectUri) {
+					await setSetting(env, `oauth_${provider}_redirect_uri`, redirectUri);
+				}
+				for (const field of (extraFields[provider] || [])) {
+					const value = body[`oauth_${provider}_${field}`]?.trim();
+					if (value) {
+						await setSetting(env, `oauth_${provider}_${field}`, value);
+					}
+				}
+				configured++;
+			}
+		}
+
+		if (configured === 0) {
+			return jsonError("Please configure at least one OAuth provider", 400);
+		}
+
+		return jsonResponse({ message: `OAuth configured for ${configured} provider(s)` });
+	} catch (err) {
+		return jsonError("Failed to configure OAuth", 500);
+	}
+}
+
+async function handleLogin(request: Request, env: Env) {
+	try {
+		const body = await request.json<{ username: string; password: string }>();
+		if (!body.username?.trim() || !body.password?.trim()) {
+			return jsonError("Username and password are required", 400);
+		}
+		const user = await env.DB.prepare("SELECT id, username, password_hash, is_admin, email, email_verified FROM users WHERE username = ?").bind(body.username.trim()).first() as Record<string, string | number> | null;
+		if (!user || !(await verifyPassword(body.password, user.password_hash as string))) {
+			return jsonError("Invalid username or password", 401);
+		}
+		const emailRequired = await getSetting(env, "email_verification_required");
+		if (emailRequired === "true" && (!user.email || Number(user.email_verified) !== 1)) {
+			return jsonError("Please bind and verify your email first", 403);
+		}
+		const sessionToken = generateSessionToken();
+		await env.DB.prepare("UPDATE users SET session_token = ? WHERE id = ?").bind(sessionToken, user.id).run();
+		return jsonResponse({ user: { id: Number(user.id), username: user.username, isAdmin: Number(user.is_admin) === 1 } }, 200, sessionToken);
+	} catch (err) {
+		return jsonError("Failed to login", 500);
+	}
+}
+
+async function handleLogout(env: Env, sessionToken: string | null) {
+	if (!sessionToken) return jsonError("Not logged in", 400);
+	await env.DB.prepare("UPDATE users SET session_token = NULL WHERE session_token = ?").bind(sessionToken).run();
+	return new Response(null, { status: 204, headers: { "Set-Cookie": "session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0" } });
+}
+
+async function handleOAuthAuthorize(request: Request, env: Env, provider: string) {
+	const providerKey = provider as OAuthProvider;
+	if (!OAUTH_PROVIDERS[providerKey]) {
+		return jsonError("Unsupported OAuth provider", 400);
+	}
+
+	const config = await getOAuthConfig(env, providerKey, request.url);
+	if (!config) {
+		return jsonError(`OAuth provider ${provider} not configured. Please configure it in admin settings first.`, 400);
+	}
+
+	const state = generateSessionToken();
+	const authUrl = getAuthorizationUrl(providerKey, config, state);
+
+	const response = new Response(null, {
+		status: 302,
+		headers: {
+			Location: authUrl,
+			"Set-Cookie": `oauth_state=${state}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${60 * 10}`,
+		},
+	});
+
+	return response;
+}
+
+async function handleOAuthCallback(request: Request, env: Env, provider: string) {
+	const providerKey = provider as OAuthProvider;
+	if (!OAUTH_PROVIDERS[providerKey]) {
+		return jsonError("Unsupported OAuth provider", 400);
+	}
+
+	const url = new URL(request.url);
+	const code = url.searchParams.get("code");
+	const state = url.searchParams.get("state");
+	const error = url.searchParams.get("error");
+
+	if (error) {
+		const errorDesc = url.searchParams.get("error_description") || error;
+		return new Response(renderOAuthError(errorDesc), { headers: { "content-type": "text/html" } });
+	}
+
+	if (!code || !state) {
+		return new Response(renderOAuthError("Missing code or state parameter"), { headers: { "content-type": "text/html" } });
+	}
+
+	const cookie = request.headers.get("Cookie");
+	const savedState = cookie?.match(/oauth_state=([^;]+)/)?.[1];
+	if (!savedState || savedState !== state) {
+		return new Response(renderOAuthError("Invalid state parameter. Possible CSRF attack."), { headers: { "content-type": "text/html" } });
+	}
+
+	const config = await getOAuthConfig(env, providerKey, request.url);
+	if (!config) {
+		return new Response(renderOAuthError(`OAuth provider ${provider} not configured`), { headers: { "content-type": "text/html" } });
+	}
+
+	try {
+		const accessToken = await exchangeCodeForToken(providerKey, config, code);
+		const userInfo = await fetchUserInfo(providerKey, accessToken, config);
+
+		const existingOAuth = await env.DB.prepare(
+			"SELECT u.id, u.username, u.is_admin, u.email, u.email_verified FROM users u JOIN oauth_users o ON u.id = o.user_id WHERE o.provider = ? AND o.provider_id = ?"
+		).bind(providerKey, userInfo.providerId).first() as Record<string, string | number> | null;
+
+		if (existingOAuth) {
+			const sessionToken = generateSessionToken();
+			await env.DB.prepare("UPDATE users SET session_token = ? WHERE id = ?").bind(sessionToken, existingOAuth.id).run();
+			return new Response(null, {
+				status: 302,
+				headers: {
+					Location: "/",
+					"Set-Cookie": `session=${sessionToken}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${60 * 60 * 24 * 7}`,
+				},
+			});
+		}
+
+		const userCount = await env.DB.prepare("SELECT COUNT(*) as count FROM users").first() as Record<string, number>;
+		const isAdmin = (userCount?.count ?? 0) === 0 ? 1 : 0;
+
+		const username = userInfo.username || `${providerKey}_${userInfo.providerId}`;
+		const existingUser = await env.DB.prepare("SELECT id FROM users WHERE username = ?").bind(username).first();
+
+		let userId: number;
+		if (existingUser) {
+			const uniqueUsername = `${username}_${userInfo.providerId.slice(-8)}`;
+			await env.DB.prepare("INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, ?)").bind(uniqueUsername, "", isAdmin).run();
+			const newUser = await env.DB.prepare("SELECT id FROM users WHERE username = ?").bind(uniqueUsername).first() as Record<string, number>;
+			userId = newUser.id;
+		} else {
+			await env.DB.prepare("INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, ?)").bind(username, "", isAdmin).run();
+			const newUser = await env.DB.prepare("SELECT id FROM users WHERE username = ?").bind(username).first() as Record<string, number>;
+			userId = newUser.id;
+		}
+
+		await env.DB.prepare("INSERT INTO oauth_users (user_id, provider, provider_id) VALUES (?, ?, ?)").bind(userId, providerKey, userInfo.providerId).run();
+
+		if (userInfo.email) {
+			await env.DB.prepare("UPDATE users SET email = ?, email_verified = 1 WHERE id = ?").bind(userInfo.email, userId).run();
+		}
+
+		const sessionToken = generateSessionToken();
+		await env.DB.prepare("UPDATE users SET session_token = ? WHERE id = ?").bind(sessionToken, userId).run();
+
+		const user = await env.DB.prepare("SELECT id, username, is_admin FROM users WHERE id = ?").bind(userId).first() as Record<string, string | number>;
+		return new Response(null, {
+			status: 302,
+			headers: {
+				Location: "/",
+				"Set-Cookie": `session=${sessionToken}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${60 * 60 * 24 * 7}`,
+			},
+		});
+	} catch (err) {
+		return new Response(renderOAuthError(`OAuth login failed: ${(err as Error).message}`), { headers: { "content-type": "text/html" } });
+	}
+}
+
+function renderOAuthError(message: string): string {
+	return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<title>OAuth 错误</title>
+	<style>
+		* { margin: 0; padding: 0; box-sizing: border-box; }
+		body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f5f5; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+		.error-container { background: white; padding: 2.5rem; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); width: 100%; max-width: 400px; text-align: center; }
+		h1 { color: #ff4d4f; margin-bottom: 1rem; }
+		p { color: #666; margin-bottom: 2rem; }
+		a { display: inline-block; padding: 0.75rem 1.5rem; background: #0E838F; color: white; border-radius: 8px; text-decoration: none; }
+	</style>
+</head>
+<body>
+	<div class="error-container">
+		<h1>OAuth 登录失败</h1>
+		<p>${escapeHtml(message)}</p>
+		<a href="/">返回登录页</a>
+	</div>
+</body>
+</html>`;
+}
+
+function escapeHtml(text: string): string {
+	return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+async function handleGetTodos(env: Env, userId: number) {
+	try {
+		const { results } = await env.DB.prepare("SELECT id, title, completed, is_public, created_at FROM todos WHERE owner_id = ? ORDER BY created_at DESC").bind(userId).all();
+		return jsonResponse(results);
+	} catch (err) {
+		return jsonError("Failed to fetch todos", 500);
+	}
+}
+
+async function handleCreateTodo(request: Request, env: Env, userId: number) {
+	try {
+		const body = await request.json<{ title: string }>();
+		if (!body.title?.trim()) {
+			return jsonError("Title is required", 400);
+		}
+		const result = await env.DB.prepare("INSERT INTO todos (title, owner_id) VALUES (?, ?) RETURNING id, title, completed, is_public, created_at").bind(body.title.trim(), userId).first();
+		return jsonResponse(result, 201);
+	} catch (err) {
+		return jsonError("Failed to create todo", 500);
+	}
+}
+
+async function handleUpdateTodo(request: Request, env: Env, userId: number, id: number) {
+	try {
+		const body = await request.json<{ title?: string; completed?: boolean }>();
+		const todo = await env.DB.prepare("SELECT * FROM todos WHERE id = ? AND owner_id = ?").bind(id, userId).first();
+		if (!todo) {
+			return jsonError("Todo not found", 404);
+		}
+		const newTitle = body.title ?? (todo as Record<string, unknown>).title;
+		const newCompleted = body.completed !== undefined ? (body.completed ? 1 : 0) : (todo as Record<string, unknown>).completed;
+		const updated = await env.DB.prepare("UPDATE todos SET title = ?, completed = ? WHERE id = ? AND owner_id = ? RETURNING id, title, completed, is_public, created_at").bind(newTitle, newCompleted, id, userId).first();
+		return jsonResponse(updated);
+	} catch (err) {
+		return jsonError("Failed to update todo", 500);
+	}
+}
+
+async function handleDeleteTodo(env: Env, userId: number, id: number) {
+	try {
+		const todo = await env.DB.prepare("SELECT * FROM todos WHERE id = ? AND owner_id = ?").bind(id, userId).first();
+		if (!todo) {
+			return jsonError("Todo not found", 404);
+		}
+		await env.DB.prepare("DELETE FROM todos WHERE id = ? AND owner_id = ?").bind(id, userId).run();
+		return new Response(null, { status: 204 });
+	} catch (err) {
+		return jsonError("Failed to delete todo", 500);
+	}
+}
+
+async function handleTogglePublic(request: Request, env: Env, userId: number) {
+	try {
+		const body = await request.json<{ id: number; isPublic: boolean }>();
+		const todo = await env.DB.prepare("SELECT * FROM todos WHERE id = ? AND owner_id = ?").bind(body.id, userId).first();
+		if (!todo) {
+			return jsonError("Todo not found", 404);
+		}
+		const updated = await env.DB.prepare("UPDATE todos SET is_public = ? WHERE id = ? AND owner_id = ? RETURNING id, title, completed, is_public, created_at").bind(body.isPublic ? 1 : 0, body.id, userId).first();
+		return jsonResponse(updated);
+	} catch (err) {
+		return jsonError("Failed to update visibility", 500);
+	}
+}
+
+async function handleGetPublicTodos(env: Env, username: string) {
+	try {
+		const user = await env.DB.prepare("SELECT id, username FROM users WHERE username = ?").bind(username).first() as Record<string, string> | null;
+		if (!user) {
+			return jsonError("User not found", 404);
+		}
+		const { results } = await env.DB.prepare("SELECT id, title, completed, created_at FROM todos WHERE owner_id = ? AND is_public = 1 ORDER BY created_at DESC").bind(user.id).all();
+		return jsonResponse({ username: user.username, todos: results });
+	} catch (err) {
+		return jsonError("Failed to fetch public todos", 500);
+	}
+}
+
+async function handleGetUsers(env: Env) {
+	try {
+		const { results } = await env.DB.prepare("SELECT id, username, is_admin, created_at FROM users ORDER BY created_at DESC").all();
+		return jsonResponse(results);
+	} catch (err) {
+		return jsonError("Failed to fetch users", 500);
+	}
+}
+
+async function handleDeleteUser(request: Request, env: Env) {
+	try {
+		const body = await request.json<{ userId: number }>();
+		const user = await env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(body.userId).first();
+		if (!user) return jsonError("User not found", 404);
+		await env.DB.prepare("DELETE FROM todos WHERE owner_id = ?").bind(body.userId).run();
+		await env.DB.prepare("DELETE FROM users WHERE id = ?").bind(body.userId).run();
+		return jsonResponse({ message: "User deleted" });
+	} catch (err) {
+		return jsonError("Failed to delete user", 500);
+	}
+}
+
+async function handleToggleAdmin(request: Request, env: Env) {
+	try {
+		const body = await request.json<{ userId: number }>();
+		const user = await env.DB.prepare("SELECT is_admin FROM users WHERE id = ?").bind(body.userId).first() as Record<string, number> | null;
+		if (!user) return jsonError("User not found", 404);
+		const newAdmin = user.is_admin === 1 ? 0 : 1;
+		await env.DB.prepare("UPDATE users SET is_admin = ? WHERE id = ?").bind(newAdmin, body.userId).run();
+		return jsonResponse({ message: newAdmin === 1 ? "User is now admin" : "Admin removed" });
+	} catch (err) {
+		return jsonError("Failed to toggle admin", 500);
+	}
+}
+
+async function handleGetSettings(env: Env) {
+	try {
+		const oauthProviders = ["casdoor", "github", "gitee", "cloudflare", "microsoft", "google"];
+		const oauthFields = ["client_id", "client_secret", "redirect_uri"];
+		const casdoorExtraFields = ["server_url"];
+		const microsoftExtraFields = ["tenant"];
+
+		const settings: Record<string, string> = {
+			registration_enabled: await getSetting(env, "registration_enabled"),
+			email_verification_required: await getSetting(env, "email_verification_required"),
+			email_provider: await getSetting(env, "email_provider"),
+			email_api_key: await getSetting(env, "email_api_key"),
+			smtp_host: await getSetting(env, "smtp_host"),
+			smtp_port: await getSetting(env, "smtp_port"),
+			smtp_user: await getSetting(env, "smtp_user"),
+			smtp_from: await getSetting(env, "smtp_from"),
+			test_email_recipient: await getSetting(env, "test_email_recipient"),
+			wecom_corp_id: await getSetting(env, "wecom_corp_id"),
+			lark_user_mailbox_id: await getSetting(env, "lark_user_mailbox_id"),
+		};
+
+		for (const provider of oauthProviders) {
+			for (const field of [...oauthFields, ...(provider === "casdoor" ? casdoorExtraFields : []), ...(provider === "microsoft" ? microsoftExtraFields : [])]) {
+				settings[`oauth_${provider}_${field}`] = await getSetting(env, `oauth_${provider}_${field}`);
+			}
+		}
+
+		return jsonResponse(settings);
+	} catch (err) {
+		return jsonError("Failed to fetch settings", 500);
+	}
+}
+
+async function handleUpdateSettings(request: Request, env: Env) {
+	try {
+		const body = await request.json<Record<string, string>>();
+		const oauthProviders = ["casdoor", "github", "gitee", "cloudflare", "microsoft", "google"];
+		const oauthFields = ["client_id", "client_secret", "redirect_uri"];
+		const casdoorExtraFields = ["server_url"];
+		const microsoftExtraFields = ["tenant"];
+
+		const allowedKeys = [
+			"registration_enabled", "email_verification_required", "email_provider", "email_api_key",
+			"smtp_host", "smtp_port", "smtp_user", "smtp_pass", "smtp_from", "test_email_recipient",
+			"wecom_corp_id", "wecom_app_secret", "lark_user_access_token", "lark_user_mailbox_id",
+		];
+
+		for (const provider of oauthProviders) {
+			for (const field of [...oauthFields, ...(provider === "casdoor" ? casdoorExtraFields : []), ...(provider === "microsoft" ? microsoftExtraFields : [])]) {
+				allowedKeys.push(`oauth_${provider}_${field}`);
+			}
+		}
+
+		for (const key of allowedKeys) {
+			if (body[key] !== undefined) {
+				await setSetting(env, key, body[key]);
+			}
+		}
+		return jsonResponse({ message: "Settings updated" });
+	} catch (err) {
+		return jsonError("Failed to update settings", 500);
+	}
+}
+
+async function handleTestSmtp(request: Request, env: Env) {
+	try {
+		const provider = await getSetting(env, "email_provider");
+		const apiKey = await getSetting(env, "email_api_key");
+		const from = await getSetting(env, "smtp_from");
+		const recipient = await getSetting(env, "test_email_recipient");
+		const wecomCorpId = await getSetting(env, "wecom_corp_id");
+		const wecomAppSecret = await getSetting(env, "wecom_app_secret");
+
+		if (!provider) {
+			return jsonError("Please select an email provider", 400);
+		}
+
+		if (provider === "wecom") {
+			if (!wecomCorpId || !wecomAppSecret) {
+				return jsonError("Please fill in WeCom Corp ID and App Secret", 400);
+			}
+		} else if (provider === "custom_smtp") {
+			return jsonError("Cloudflare Workers cannot directly connect to SMTP servers. Please use an HTTP API provider.", 400);
+		} else if (!apiKey) {
+			return jsonError("Please fill in API key", 400);
+		}
+
+		if (!recipient && !from) {
+			return jsonError("Please fill in test recipient or sender address", 400);
+		}
+
+		const to = recipient || from;
+		const result = await sendEmail(to, "测试邮件", "<p>这是一封来自待办事项应用的测试邮件。</p>", env);
+		if (!result.success) {
+			return jsonError(result.error || "Failed to send test email", 500);
+		}
+		return jsonResponse({ message: `Test email sent to ${to}` });
+	} catch (err) {
+		return jsonError("Failed to test email", 500);
+	}
+}
+
+async function handleSendEmailCode(request: Request, env: Env, userId: number) {
+	try {
+		const body = await request.json<{ email: string }>();
+		const email = body.email?.trim();
+		if (!email || !email.includes("@")) {
+			return jsonError("Invalid email address", 400);
+		}
+		const existing = await env.DB.prepare("SELECT id FROM users WHERE email = ? AND id != ?").bind(email, userId).first();
+		if (existing) {
+			return jsonError("Email already in use", 409);
+		}
+		const code = Math.floor(100000 + Math.random() * 900000).toString();
+		const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+		await env.DB.prepare("INSERT INTO email_verification_codes (user_id, email, code, expires_at) VALUES (?, ?, ?, ?)").bind(userId, email, code, expiresAt).run();
+		const provider = await getSetting(env, "email_provider");
+		const apiKey = await getSetting(env, "email_api_key");
+		if (provider && apiKey) {
+			const result = await sendEmail(email, "邮箱验证码", `<p>您的验证码是：<strong>${code}</strong></p><p>有效期10分钟。</p>`, env);
+			if (!result.success) {
+				return jsonError(result.error || "Failed to send email", 500);
+			}
+			return jsonResponse({ message: "Verification code sent to your email" });
+		}
+		return jsonResponse({ message: "Email provider not configured. For testing, your code is: " + code });
+	} catch (err) {
+		return jsonError("Failed to send verification code", 500);
+	}
+}
+
+async function handleVerifyEmailCode(request: Request, env: Env, userId: number) {
+	try {
+		const body = await request.json<{ email: string; code: string }>();
+		if (!body.email?.trim() || !body.code?.trim()) {
+			return jsonError("Email and code are required", 400);
+		}
+		const record = await env.DB.prepare("SELECT * FROM email_verification_codes WHERE user_id = ? AND email = ? AND code = ? AND expires_at > datetime('now') ORDER BY created_at DESC LIMIT 1").bind(userId, body.email.trim(), body.code.trim()).first();
+		if (!record) {
+			return jsonError("Invalid or expired verification code", 400);
+		}
+		await env.DB.prepare("UPDATE users SET email = ?, email_verified = 1 WHERE id = ?").bind(body.email.trim(), userId).run();
+		await env.DB.prepare("DELETE FROM email_verification_codes WHERE user_id = ?").bind(userId).run();
+		return jsonResponse({ message: "Email verified successfully" });
+	} catch (err) {
+		return jsonError("Failed to verify email", 500);
+	}
+}
+
+function jsonResponse(data: unknown, status = 200, sessionToken?: string) {
+	const headers: Record<string, string> = { "content-type": "application/json" };
+	if (sessionToken) {
+		headers["Set-Cookie"] = `session=${sessionToken}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${60 * 60 * 24 * 7}`;
+	}
+	return new Response(JSON.stringify(data), { status, headers });
+}
+
+function jsonResponseWithRedirect(data: unknown, status = 200, sessionToken?: string, redirectUrl?: string) {
+	const headers: Record<string, string> = { "content-type": "application/json" };
+	if (sessionToken) {
+		headers["Set-Cookie"] = `session=${sessionToken}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${60 * 60 * 24 * 7}`;
+	}
+	if (redirectUrl) {
+		headers["X-Redirect-Url"] = redirectUrl;
+	}
+	return new Response(JSON.stringify(data), { status, headers });
+}
+
+function jsonError(message: string, status = 500) {
+	return jsonResponse({ error: message }, status);
+}
