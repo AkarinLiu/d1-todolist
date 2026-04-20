@@ -177,9 +177,8 @@ function getTokenUrl(provider: OAuthProvider, config: OAuthConfig): string {
 }
 
 async function fetchGitHubUser(accessToken: string): Promise<OAuthUserInfo> {
-	const res = await fetch("https://api.github.com/user", {
-		headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/vnd.github.v3+json" },
-	});
+	const headers = { Authorization: `Bearer ${accessToken}`, Accept: "application/vnd.github.v3+json", "User-Agent": "Cloudflare-Worker" };
+	const res = await fetch("https://api.github.com/user", { headers });
 	if (!res.ok) {
 		const body = await res.text();
 		throw new Error(`Failed to fetch GitHub user (HTTP ${res.status}): ${body}`);
@@ -188,9 +187,7 @@ async function fetchGitHubUser(accessToken: string): Promise<OAuthUserInfo> {
 
 	let email = (user.email as string) || null;
 	if (!email) {
-		const emailRes = await fetch("https://api.github.com/user/emails", {
-			headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/vnd.github.v3+json" },
-		});
+		const emailRes = await fetch("https://api.github.com/user/emails", { headers });
 		if (emailRes.ok) {
 			const emails = (await emailRes.json()) as Array<{ email: string; primary: boolean; verified: boolean }>;
 			const primary = emails.find((e) => e.primary && e.verified);
