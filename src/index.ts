@@ -331,11 +331,23 @@ async function handleOAuthCallback(request: Request, env: Env, provider: string)
 		if (existingOAuth) {
 			const sessionToken = generateSessionToken();
 			await env.DB.prepare("UPDATE users SET session_token = ? WHERE id = ?").bind(sessionToken, existingOAuth.id).run();
+
+			const emailRequired = await getSetting(env, "email_verification_required");
+			if (emailRequired === "true" && (!existingOAuth.email || Number(existingOAuth.email_verified) !== 1)) {
+				return new Response(null, {
+					status: 302,
+					headers: {
+						Location: "/profile",
+						"Set-Cookie": `session=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${60 * 60 * 24 * 7}`,
+					},
+				});
+			}
+
 			return new Response(null, {
 				status: 302,
 				headers: {
 					Location: "/",
-					"Set-Cookie": `session=${sessionToken}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${60 * 60 * 24 * 7}`,
+					"Set-Cookie": `session=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${60 * 60 * 24 * 7}`,
 				},
 			});
 		}
@@ -367,7 +379,18 @@ async function handleOAuthCallback(request: Request, env: Env, provider: string)
 		const sessionToken = generateSessionToken();
 		await env.DB.prepare("UPDATE users SET session_token = ? WHERE id = ?").bind(sessionToken, userId).run();
 
-		const user = await env.DB.prepare("SELECT id, username, is_admin FROM users WHERE id = ?").bind(userId).first() as Record<string, string | number>;
+		const emailRequired = await getSetting(env, "email_verification_required");
+		const newUserProfile = await env.DB.prepare("SELECT email, email_verified FROM users WHERE id = ?").bind(userId).first() as Record<string, string | number> | null;
+		if (emailRequired === "true" && (!newUserProfile?.email || Number(newUserProfile?.email_verified) !== 1)) {
+			return new Response(null, {
+				status: 302,
+				headers: {
+					Location: "/profile",
+					"Set-Cookie": `session=${sessionToken}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${60 * 60 * 24 * 7}`,
+				},
+			});
+		}
+
 		return new Response(null, {
 			status: 302,
 			headers: {
