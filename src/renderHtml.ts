@@ -81,6 +81,8 @@ export function renderHtml(username: string, isAdmin: boolean) {
 		.filter-group-header .group-actions button { padding: 0.1rem 0.3rem; border: none; border-radius: 3px; cursor: pointer; font-size: 0.65rem; background: transparent; color: #999; }
 		.filter-group-header .group-actions button:hover { background: #eee; color: #333; }
 		.filter-group-header .group-actions button.delete:hover { background: #fde8e8; color: #c53030; }
+		.public-group-toggle { padding: 0.2rem 0.4rem; border: none; border-radius: 3px; cursor: pointer; font-size: 0.65rem; background: #e8e8e8; color: #666; transition: all 0.2s; }
+		.public-group-toggle.active { background: #0E838F; color: white; }
 		.filter-group-items { padding-left: 1rem; }
 		.add-group-btn { display: flex; align-items: center; justify-content: center; width: 100%; padding: 0.4rem; border: 1px dashed #ccc; border-radius: 6px; background: transparent; color: #999; cursor: pointer; font-size: 0.8rem; margin-top: 0.5rem; transition: all 0.2s; }
 		.add-group-btn:hover { border-color: #0E838F; color: #0E838F; background: #f0fafa; }
@@ -221,6 +223,7 @@ export function renderHtml(username: string, isAdmin: boolean) {
 							<button class="cancel" onclick="event.stopPropagation();cancelGroupEdit()">✗</button>
 						</div>\`
 					: \`<div class="group-actions">
+							<button class="public-group-toggle \${group.is_public ? 'active' : ''}" onclick="event.stopPropagation();toggleGroupPublic(\${group.id}, \${group.is_public})" title="\${group.is_public ? '公开' : '私有'}">\${group.is_public ? '公开' : '私有'}</button>
 							<button onclick="event.stopPropagation();startGroupEdit(\${group.id})">✎</button>
 							<button class="delete" onclick="event.stopPropagation();deleteGroup(\${group.id})">✕</button>
 						</div>\`;
@@ -303,6 +306,17 @@ export function renderHtml(username: string, isAdmin: boolean) {
 				if (currentFilter.type === "group" && currentFilter.id === id) {
 					currentFilter = { type: "all", id: null };
 				}
+				await fetchData();
+			}
+		};
+
+		window.toggleGroupPublic = async function(id, current) {
+			const res = await fetch("/api/tag-groups/" + id, {
+				method: "PUT",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ is_public: !current })
+			});
+			if (res.ok) {
 				await fetchData();
 			}
 		};
@@ -933,6 +947,8 @@ export function renderPublicPage(username: string) {
 		.step-item.completed .step-title { text-decoration: line-through; color: #999; }
 		.step-title { font-size: 0.875rem; }
 		.empty-state { text-align: center; color: #999; padding: 3rem 0; }
+		.todo-tags { display: flex; flex-wrap: wrap; gap: 0.3rem; padding: 0 1rem 0.75rem; }
+		.tag-badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 10px; font-size: 0.7rem; color: white; }
 	</style>
 </head>
 <body>
@@ -943,12 +959,22 @@ export function renderPublicPage(username: string) {
 	</div>
 	<script>
 		const todoList = document.getElementById("todoList");
+		let allPublicTags = [];
 
 		async function fetchTodos() {
-			const res = await fetch(\`/api/public/todos?username=${escapeHtml(username)}\`);
-			const data = await res.json();
-			if (!res.ok) { todoList.innerHTML = '<li class="empty-state">' + data.error + '</li>'; return; }
-			renderTodos(data.todos);
+			const [todosRes, tagsRes] = await Promise.all([
+				fetch(\`/api/public/todos?username=${escapeHtml(username)}\`),
+				fetch(\`/api/public/tags?username=${escapeHtml(username)}\`)
+			]);
+			const todosData = await todosRes.json();
+			if (!todosRes.ok) { todoList.innerHTML = '<li class="empty-state">' + todosData.error + '</li>'; return; }
+			allPublicTags = tagsRes.ok ? await tagsRes.json() : [];
+			const todosWithTags = await Promise.all(todosData.todos.map(async (todo) => {
+				const tagsRes = await fetch(\`/api/public/todo-tags?username=${escapeHtml(username)}&todo_id=\${todo.id}\`);
+				const tags = tagsRes.ok ? await tagsRes.json() : [];
+				return { ...todo, tags };
+			}));
+			renderTodos(todosWithTags);
 		}
 
 		function renderTodos(todos) {
@@ -957,6 +983,9 @@ export function renderPublicPage(username: string) {
 				return;
 			}
 			todoList.innerHTML = todos.map(todo => {
+				const tagsHtml = (todo.tags || []).map(tag => \`
+					<span class="tag-badge" style="background: \${tag.color}" title="\${escapeHtml(tag.name)}">\${escapeHtml(tag.name)}</span>
+				\`).join("");
 				const stepsHtml = todo.steps && todo.steps.length > 0 ? \`
 					<div class="steps-container">
 						<div class="steps-inner">
@@ -978,6 +1007,7 @@ export function renderPublicPage(username: string) {
 							<input type="checkbox" \${todo.completed ? 'checked' : ''} disabled />
 							<span class="todo-title">\${escapeHtml(todo.title)}</span>
 						</div>
+						<div class="todo-tags">\${tagsHtml}</div>
 						\${stepsHtml}
 					</li>
 				\`;

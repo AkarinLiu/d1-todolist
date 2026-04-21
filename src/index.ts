@@ -244,6 +244,25 @@ export default {
 			return handleGetPublicTodos(env, username);
 		}
 
+		if (path === "/api/public/tag-groups" && method === "GET") {
+			const username = url.searchParams.get("username");
+			if (!username) return jsonError("Username required", 400);
+			return handleGetPublicTagGroups(env, username);
+		}
+
+		if (path === "/api/public/tags" && method === "GET") {
+			const username = url.searchParams.get("username");
+			if (!username) return jsonError("Username required", 400);
+			return handleGetPublicTags(env, username);
+		}
+
+		if (path === "/api/public/todo-tags" && method === "GET") {
+			const username = url.searchParams.get("username");
+			const todoId = url.searchParams.get("todo_id");
+			if (!username || !todoId) return jsonError("Username and todo_id required", 400);
+			return handleGetPublicTodoTags(env, username, parseInt(todoId, 10));
+		}
+
 		return new Response("Not Found", { status: 404 });
 	},
 } satisfies ExportedHandler<Env>;
@@ -608,6 +627,61 @@ async function handleGetPublicTodos(env: Env, username: string) {
 	}
 }
 
+async function handleGetPublicTagGroups(env: Env, username: string) {
+	try {
+		const user = await env.DB.prepare("SELECT id FROM users WHERE username = ?").bind(username).first() as Record<string, number> | null;
+		if (!user) {
+			return jsonError("User not found", 404);
+		}
+		const { results } = await env.DB.prepare("SELECT id, name, sort_order FROM tag_groups WHERE owner_id = ? AND is_public = 1 ORDER BY sort_order ASC, created_at ASC").bind(user.id).all();
+		return jsonResponse(results);
+	} catch (err) {
+		return jsonError("Failed to fetch public tag groups", 500);
+	}
+}
+
+async function handleGetPublicTags(env: Env, username: string) {
+	try {
+		const user = await env.DB.prepare("SELECT id FROM users WHERE username = ?").bind(username).first() as Record<string, number> | null;
+		if (!user) {
+			return jsonError("User not found", 404);
+		}
+		const { results } = await env.DB.prepare(`
+			SELECT t.id, t.name, t.group_id, t.color 
+			FROM tags t 
+			WHERE t.owner_id = ? 
+			AND (t.group_id IS NULL OR t.group_id IN (SELECT id FROM tag_groups WHERE owner_id = ? AND is_public = 1))
+			ORDER BY t.created_at ASC
+		`).bind(user.id, user.id).all();
+		return jsonResponse(results);
+	} catch (err) {
+		return jsonError("Failed to fetch public tags", 500);
+	}
+}
+
+async function handleGetPublicTodoTags(env: Env, username: string, todoId: number) {
+	try {
+		const user = await env.DB.prepare("SELECT id FROM users WHERE username = ?").bind(username).first() as Record<string, number> | null;
+		if (!user) {
+			return jsonError("User not found", 404);
+		}
+		const todo = await env.DB.prepare("SELECT id FROM todos WHERE id = ? AND owner_id = ? AND is_public = 1").bind(todoId, user.id).first();
+		if (!todo) {
+			return jsonError("Todo not found or not public", 404);
+		}
+		const { results } = await env.DB.prepare(`
+			SELECT t.id, t.name, t.group_id, t.color 
+			FROM tags t 
+			JOIN todo_tags tt ON t.id = tt.tag_id 
+			WHERE tt.todo_id = ?
+			AND (t.group_id IS NULL OR t.group_id IN (SELECT id FROM tag_groups WHERE owner_id = ? AND is_public = 1))
+		`).bind(todoId, user.id).all();
+		return jsonResponse(results);
+	} catch (err) {
+		return jsonError("Failed to fetch todo tags", 500);
+	}
+}
+
 async function handleGetSteps(env: Env, userId: number, todoId: number) {
 	try {
 		const todo = await env.DB.prepare("SELECT id FROM todos WHERE id = ? AND owner_id = ?").bind(todoId, userId).first();
@@ -856,7 +930,7 @@ async function handleVerifyEmailCode(request: Request, env: Env, userId: number)
 
 async function handleGetTagGroups(env: Env, userId: number) {
 	try {
-		const { results } = await env.DB.prepare("SELECT id, name, sort_order, created_at FROM tag_groups WHERE owner_id = ? ORDER BY sort_order ASC, created_at ASC").bind(userId).all();
+		const { results } = await env.DB.prepare("SELECT id, name, sort_order, is_public, created_at FROM tag_groups WHERE owner_id = ? ORDER BY sort_order ASC, created_at ASC").bind(userId).all();
 		return jsonResponse(results);
 	} catch (err) {
 		return jsonError("Failed to fetch tag groups", 500);
@@ -865,13 +939,14 @@ async function handleGetTagGroups(env: Env, userId: number) {
 
 async function handleCreateTagGroup(request: Request, env: Env, userId: number) {
 	try {
-		const body = await request.json<{ name: string; sort_order?: number }>();
+		const body = await request.json<{ name: string; sort_order?: number; is_public?: boolean }>();
 		if (!body.name?.trim()) {
 			return jsonError("Name is required", 400);
 		}
 		const maxOrder = await env.DB.prepare("SELECT COALESCE(MAX(sort_order), -1) as max_order FROM tag_groups WHERE owner_id = ?").bind(userId).first() as Record<string, number>;
 		const sortOrder = body.sort_order ?? (maxOrder?.max_order ?? -1) + 1;
-		const result = await env.DB.prepare("INSERT INTO tag_groups (name, owner_id, sort_order) VALUES (?, ?, ?) RETURNING id, name, sort_order, created_at").bind(body.name.trim(), userId, sortOrder).first();
+		const isPublic = body.is_public ? 1 : 0;
+		const result = await env.DB.prepare("INSERT INTO tag_groups (name, owner_id, sort_order, is_public) VALUES (?, ?, ?, ?) RETURNING id, name, sort_order, is_public, created_at").bind(body.name.trim(), userId, sortOrder, isPublic).first();
 		return jsonResponse(result, 201);
 	} catch (err) {
 		return jsonError("Failed to create tag group", 500);
@@ -884,11 +959,12 @@ async function handleUpdateTagGroup(request: Request, env: Env, userId: number, 
 		if (!group) {
 			return jsonError("Tag group not found", 404);
 		}
-		const body = await request.json<{ name?: string; sort_order?: number }>();
+		const body = await request.json<{ name?: string; sort_order?: number; is_public?: boolean }>();
 		const existing = group as Record<string, unknown>;
 		const newName = body.name !== undefined ? body.name.trim() : existing.name;
 		const newSortOrder = body.sort_order !== undefined ? body.sort_order : existing.sort_order;
-		const updated = await env.DB.prepare("UPDATE tag_groups SET name = ?, sort_order = ? WHERE id = ? AND owner_id = ? RETURNING id, name, sort_order, created_at").bind(newName, newSortOrder, id, userId).first();
+		const newIsPublic = body.is_public !== undefined ? (body.is_public ? 1 : 0) : existing.is_public;
+		const updated = await env.DB.prepare("UPDATE tag_groups SET name = ?, sort_order = ?, is_public = ? WHERE id = ? AND owner_id = ? RETURNING id, name, sort_order, is_public, created_at").bind(newName, newSortOrder, newIsPublic, id, userId).first();
 		return jsonResponse(updated);
 	} catch (err) {
 		return jsonError("Failed to update tag group", 500);
