@@ -73,7 +73,7 @@ export default {
 			if (!user) return new Response("Unauthorized", { status: 401 });
 			const profile = await env.DB.prepare("SELECT email, email_verified, password_hash FROM users WHERE id = ?").bind(user.id).first() as Record<string, string | number> | null;
 			const hasPassword = typeof profile?.password_hash === "string" && (profile.password_hash as string).length > 0;
-			return new Response(renderProfilePage(user.username, profile?.email as string | null, Number(profile?.email_verified) === 1, hasPassword), {
+			return new Response(renderProfilePage(user.username, profile?.email as string | null, Number(profile?.email_verified) === 1, hasPassword, env.TURNSTILE_SITE_KEY || ""), {
 				headers: { "content-type": "text/html" },
 			});
 		}
@@ -392,15 +392,8 @@ async function handleRegisterSendCode(request: Request, env: Env) {
 		if (!body.username?.trim() || !body.password?.trim() || !body.email?.trim()) {
 			return jsonError("Username, password and email are required", 400);
 		}
-		if (env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET_KEY) {
-			if (!body.turnstileToken) {
-				return jsonError("请完成人机验证", 400);
-			}
-			const verified = await verifyTurnstile(body.turnstileToken, env);
-			if (!verified) {
-				return jsonError("人机验证失败", 400);
-			}
-		}
+		const turnstileError = await requireTurnstile(body.turnstileToken, env);
+		if (turnstileError) return turnstileError;
 		if (body.password.length < 6) {
 			return jsonError("Password must be at least 6 characters", 400);
 		}
@@ -484,15 +477,8 @@ async function handleForgotPassword(request: Request, env: Env) {
 		if (!body.username?.trim()) {
 			return jsonError("Username is required", 400);
 		}
-		if (env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET_KEY) {
-			if (!body.turnstileToken) {
-				return jsonError("请完成人机验证", 400);
-			}
-			const verified = await verifyTurnstile(body.turnstileToken, env);
-			if (!verified) {
-				return jsonError("人机验证失败", 400);
-			}
-		}
+		const turnstileError = await requireTurnstile(body.turnstileToken, env);
+		if (turnstileError) return turnstileError;
 
 		const user = await env.DB.prepare("SELECT id, email, email_verified FROM users WHERE username = ?").bind(body.username.trim()).first() as Record<string, string | number> | null;
 		if (!user) {
@@ -536,15 +522,8 @@ async function handleResetPasswordByCode(request: Request, env: Env) {
 		if (body.newPassword.length < 6) {
 			return jsonError("Password must be at least 6 characters", 400);
 		}
-		if (env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET_KEY) {
-			if (!body.turnstileToken) {
-				return jsonError("请完成人机验证", 400);
-			}
-			const verified = await verifyTurnstile(body.turnstileToken, env);
-			if (!verified) {
-				return jsonError("人机验证失败", 400);
-			}
-		}
+		const turnstileError = await requireTurnstile(body.turnstileToken, env);
+		if (turnstileError) return turnstileError;
 
 		const user = await env.DB.prepare("SELECT id FROM users WHERE username = ?").bind(body.username.trim()).first() as Record<string, number> | null;
 		if (!user) {
@@ -571,10 +550,12 @@ async function handleResetPasswordByCode(request: Request, env: Env) {
 
 async function handleLogin(request: Request, env: Env) {
 	try {
-		const body = await request.json<{ username: string; password: string }>();
+		const body = await request.json<{ username: string; password: string; turnstileToken?: string }>();
 		if (!body.username?.trim() || !body.password?.trim()) {
 			return jsonError("Username and password are required", 400);
 		}
+		const turnstileError = await requireTurnstile(body.turnstileToken, env);
+		if (turnstileError) return turnstileError;
 		const user = await env.DB.prepare("SELECT id, username, password_hash, is_admin, email, email_verified FROM users WHERE username = ?").bind(body.username.trim()).first() as Record<string, string | number> | null;
 		if (!user || !(await verifyPassword(body.password, user.password_hash as string))) {
 			return jsonError("Invalid username or password", 401);
@@ -797,6 +778,14 @@ async function verifyTurnstile(token: string, env: Env): Promise<boolean> {
 	return data.success
 }
 
+async function requireTurnstile(token: string | undefined, env: Env): Promise<Response | null> {
+	if (!env.TURNSTILE_SITE_KEY || !env.TURNSTILE_SECRET_KEY) return null
+	if (!token) return jsonError("请完成人机验证", 400)
+	const verified = await verifyTurnstile(token, env)
+	if (!verified) return jsonError("人机验证失败", 400)
+	return null
+}
+
 async function handleRequestPasswordReset(request: Request, env: Env) {
 	try {
 		const body = await request.json<{ username: string; provider: OAuthProvider; turnstileToken?: string }>()
@@ -806,15 +795,8 @@ async function handleRequestPasswordReset(request: Request, env: Env) {
 		if (!body.provider || !OAUTH_PROVIDERS[body.provider]) {
 			return jsonError("Valid OAuth provider is required", 400)
 		}
-		if (env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET_KEY) {
-			if (!body.turnstileToken) {
-				return jsonError("请完成人机验证", 400)
-			}
-			const verified = await verifyTurnstile(body.turnstileToken, env)
-			if (!verified) {
-				return jsonError("人机验证失败", 400)
-			}
-		}
+		const turnstileError = await requireTurnstile(body.turnstileToken, env)
+		if (turnstileError) return turnstileError
 
 		const user = await env.DB.prepare(
 			"SELECT u.id FROM users u JOIN oauth_users o ON u.id = o.user_id WHERE u.username = ? AND o.provider = ?"
@@ -844,15 +826,8 @@ async function handlePasswordReset(request: Request, env: Env) {
 		if (body.newPassword.length < 6) {
 			return jsonError("Password must be at least 6 characters", 400);
 		}
-		if (env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET_KEY) {
-			if (!body.turnstileToken) {
-				return jsonError("请完成人机验证", 400);
-			}
-			const verified = await verifyTurnstile(body.turnstileToken, env);
-			if (!verified) {
-				return jsonError("人机验证失败", 400);
-			}
-		}
+		const turnstileError = await requireTurnstile(body.turnstileToken, env);
+		if (turnstileError) return turnstileError;
 
 		const record = await env.DB.prepare(
 			"SELECT user_id FROM password_reset_tokens WHERE token = ? AND expires_at > datetime('now') ORDER BY created_at DESC LIMIT 1"
@@ -1249,7 +1224,9 @@ async function handleTestSmtp(request: Request, env: Env) {
 
 async function handleSendEmailCode(request: Request, env: Env, userId: number) {
 	try {
-		const body = await request.json<{ email: string }>();
+		const body = await request.json<{ email: string; turnstileToken?: string }>();
+		const turnstileError = await requireTurnstile(body.turnstileToken, env);
+		if (turnstileError) return turnstileError;
 		const email = body.email?.trim();
 		if (!email || !email.includes("@")) {
 			return jsonError("Invalid email address", 400);

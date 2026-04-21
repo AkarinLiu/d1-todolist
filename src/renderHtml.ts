@@ -677,6 +677,7 @@ export function renderAuthPage(oauthProviders: Array<{ key: string; name: string
 				<label>密码</label>
 				<input type="password" id="loginPassword" required />
 			</div>
+			<div class="turnstile-container">${turnstileWidget("ts-login")}</div>
 			<button type="submit" class="submit-btn">登录</button>
 			<div class="link-group">
 				${registrationEnabled ? `<a href="#" onclick="showRegisterForm(); return false;">注册账号</a>` : ""}
@@ -753,6 +754,7 @@ export function renderAuthPage(oauthProviders: Array<{ key: string; name: string
 				<label>确认新密码</label>
 				<input type="password" id="resetConfirmPassword" placeholder="再次输入新密码" />
 			</div>
+			<div class="turnstile-container">${turnstileWidget("ts-reset-code")}</div>
 			<button class="submit-btn" onclick="submitResetPassword()">重置密码</button>
 			<div class="back-link">
 				<a href="#" onclick="showForgotForm(); return false;">返回上一步</a>
@@ -847,9 +849,11 @@ export function renderAuthPage(oauthProviders: Array<{ key: string; name: string
 
 		loginForm.addEventListener("submit", async (e) => {
 			e.preventDefault();
-			const res = await fetch("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: document.getElementById("loginUsername").value, password: document.getElementById("loginPassword").value }) });
+			const turnstileToken = turnstileSiteKey ? turnstile.getResponse("ts-login") : undefined;
+			if (turnstileSiteKey && !turnstileToken) { showError("请完成人机验证"); return; }
+			const res = await fetch("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: document.getElementById("loginUsername").value, password: document.getElementById("loginPassword").value, turnstileToken }) });
 			const data = await res.json();
-			if (!res.ok) { showError(data.error); return; }
+			if (!res.ok) { showError(data.error); if (turnstileSiteKey) turnstile.reset("ts-login"); return; }
 			if (data.requireEmailBind) {
 				window.location.href = "/profile";
 				return;
@@ -906,9 +910,11 @@ export function renderAuthPage(oauthProviders: Array<{ key: string; name: string
 			if (!code || !newPassword) { showError("请填写完整信息"); return; }
 			if (newPassword.length < 6) { showError("密码长度至少6位"); return; }
 			if (newPassword !== confirm) { showError("两次输入的密码不一致"); return; }
-			const res = await fetch("/api/auth/reset-password-by-code", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: forgotUsernameCache, code, newPassword }) });
+			const turnstileToken = turnstileSiteKey ? turnstile.getResponse("ts-reset-code") : undefined;
+			if (turnstileSiteKey && !turnstileToken) { showError("请完成人机验证"); return; }
+			const res = await fetch("/api/auth/reset-password-by-code", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: forgotUsernameCache, code, newPassword, turnstileToken }) });
 			const data = await res.json();
-			if (!res.ok) { showError(data.error); return; }
+			if (!res.ok) { showError(data.error); if (turnstileSiteKey) turnstile.reset("ts-reset-code"); return; }
 			showSuccess("密码重置成功！请登录");
 			setTimeout(showLoginForm, 1500);
 		}
@@ -1751,7 +1757,7 @@ export function renderSettingsPage(adminUsername: string) {
 </html>`;
 }
 
-export function renderProfilePage(username: string, email: string | null, emailVerified: boolean, hasPassword: boolean) {
+export function renderProfilePage(username: string, email: string | null, emailVerified: boolean, hasPassword: boolean, turnstileSiteKey: string) {
 	const verifiedBadge = emailVerified ? '<span style="color: #1e7e34; font-size: 0.75rem;">已验证</span>' : '<span style="color: #c53030; font-size: 0.75rem;">未验证</span>';
 	const emailDisplay = email || "未绑定";
 	const passwordStatus = hasPassword ? '<span style="color: #1e7e34; font-size: 0.75rem;">已设置</span>' : '<span style="color: #c53030; font-size: 0.75rem;">未设置</span>';
@@ -1792,7 +1798,9 @@ export function renderProfilePage(username: string, email: string | null, emailV
 		.code-inputs { display: flex; gap: 0.5rem; justify-content: center; margin: 1rem 0; }
 		.code-inputs input { width: 48px; height: 56px; text-align: center; font-size: 1.5rem; border: 2px solid #ddd; border-radius: 8px; }
 		.code-inputs input:focus { outline: none; border-color: #0E838F; }
+		.turnstile-container { margin: 1rem 0; display: flex; justify-content: center; }
 	</style>
+	${turnstileSiteKey ? '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>' : ""}
 </head>
 <body>
 	<div class="container">
@@ -1839,6 +1847,7 @@ export function renderProfilePage(username: string, email: string | null, emailV
 					<label>邮箱地址</label>
 					<input type="email" id="emailInput" placeholder="your@email.com" value="${email ? escapeHtml(email) : ""}" />
 				</div>
+				${turnstileSiteKey ? `<div class="turnstile-container"><div class="cf-turnstile" id="ts-email" data-sitekey="${turnstileSiteKey}" data-theme="light"></div></div>` : ""}
 				<button type="submit" class="btn btn-primary" id="sendCodeBtn">发送验证码</button>
 			</form>
 			<div class="verify-section" id="verifySection">
@@ -1866,6 +1875,7 @@ export function renderProfilePage(username: string, email: string | null, emailV
 		const verifySection = document.getElementById("verifySection");
 		const msgBox = document.getElementById("msgBox");
 		let currentEmail = "";
+		const turnstileSiteKey = ${turnstileSiteKey ? `"${turnstileSiteKey}"` : "null"};
 
 		passwordForm.addEventListener("submit", async (e) => {
 			e.preventDefault();
@@ -1887,9 +1897,11 @@ export function renderProfilePage(username: string, email: string | null, emailV
 			const email = emailInput.value.trim();
 			if (!email || !email.includes("@")) { showMsg("请输入有效的邮箱地址", "error"); return; }
 			currentEmail = email;
-			const res = await fetch("/api/email/send-code", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email }) });
+			const turnstileToken = turnstileSiteKey ? turnstile.getResponse("ts-email") : undefined;
+			if (turnstileSiteKey && !turnstileToken) { showMsg("请完成人机验证", "error"); return; }
+			const res = await fetch("/api/email/send-code", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, turnstileToken }) });
 			const data = await res.json();
-			if (!res.ok) { showMsg(data.error, "error"); return; }
+			if (!res.ok) { showMsg(data.error, "error"); if (turnstileSiteKey) turnstile.reset("ts-email"); return; }
 			verifySection.classList.add("active");
 			showMsg("验证码已发送", "success");
 		});
