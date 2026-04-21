@@ -1,5 +1,5 @@
-import { renderHtml, renderAuthPage, renderPublicPage, renderAdminPage, renderSettingsPage, renderProfilePage, renderSetupPage } from "./renderHtml";
-import { verifyPassword, generateSessionToken } from "./auth";
+import { renderHtml, renderAuthPage, renderPublicPage, renderAdminPage, renderSettingsPage, renderProfilePage, renderSetupPage, renderPasswordResetPage } from "./renderHtml";
+import { hashPassword, verifyPassword, generateSessionToken } from "./auth";
 import { sendEmail, getSetting, setSetting } from "./email";
 import { getOAuthConfig, getAuthorizationUrl, exchangeCodeForToken, fetchUserInfo, OAUTH_PROVIDERS, OAuthProvider } from "./oauth";
 
@@ -38,7 +38,7 @@ export default {
 					headers: { "content-type": "text/html" },
 				});
 			}
-			return new Response(renderAuthPage(oauthProviders), {
+			return new Response(renderAuthPage(oauthProviders, env.TURNSTILE_SITE_KEY || ""), {
 				headers: { "content-type": "text/html" },
 			});
 		}
@@ -70,8 +70,9 @@ export default {
 
 		if (path === "/profile" && method === "GET") {
 			if (!user) return new Response("Unauthorized", { status: 401 });
-			const profile = await env.DB.prepare("SELECT email, email_verified FROM users WHERE id = ?").bind(user.id).first() as Record<string, string | number> | null;
-			return new Response(renderProfilePage(user.username, profile?.email as string | null, Number(profile?.email_verified) === 1), {
+			const profile = await env.DB.prepare("SELECT email, email_verified, password_hash FROM users WHERE id = ?").bind(user.id).first() as Record<string, string | number> | null;
+			const hasPassword = typeof profile?.password_hash === "string" && (profile.password_hash as string).length > 0;
+			return new Response(renderProfilePage(user.username, profile?.email as string | null, Number(profile?.email_verified) === 1, hasPassword), {
 				headers: { "content-type": "text/html" },
 			});
 		}
@@ -93,12 +94,38 @@ export default {
 
 		const oauthAuthorizeMatch = path.match(/^\/api\/auth\/oauth\/authorize\/([^/]+)$/);
 		if (oauthAuthorizeMatch && method === "GET") {
-			return handleOAuthAuthorize(request, env, oauthAuthorizeMatch[1] as OAuthProvider);
+			const isResetMode = url.searchParams.get("reset") === "true";
+			return handleOAuthAuthorize(request, env, oauthAuthorizeMatch[1] as OAuthProvider, isResetMode);
 		}
 
 		const oauthCallbackMatch = path.match(/^\/api\/auth\/oauth\/callback\/([^/]+)$/);
 		if (oauthCallbackMatch && method === "GET") {
-			return handleOAuthCallback(request, env, oauthCallbackMatch[1] as OAuthProvider);
+			const isResetMode = url.searchParams.get("reset") === "true";
+			return handleOAuthCallback(request, env, oauthCallbackMatch[1] as OAuthProvider, isResetMode);
+		}
+
+		if (path === "/reset-password" && method === "GET") {
+			const token = url.searchParams.get("token");
+			if (!token) {
+				return new Response(renderAuthPage(await getEnabledOAuthProviders(env), env.TURNSTILE_SITE_KEY || ""), {
+					headers: { "content-type": "text/html" },
+				});
+			}
+			return new Response(renderPasswordResetPage(token), {
+				headers: { "content-type": "text/html" },
+			});
+		}
+
+		if (path === "/api/auth/change-password" && method === "POST") {
+			return handleChangePassword(request, env, user?.id ?? 0);
+		}
+
+		if (path === "/api/auth/reset-password" && method === "POST") {
+			return handlePasswordReset(request, env);
+		}
+
+		if (path === "/api/auth/reset-password/request" && method === "POST") {
+			return handleRequestPasswordReset(request, env);
 		}
 
 		if (path === "/api/auth/logout" && method === "POST") {
@@ -352,7 +379,7 @@ async function handleLogout(env: Env, sessionToken: string | null) {
 	return new Response(null, { status: 204, headers: { "Set-Cookie": "session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0" } });
 }
 
-async function handleOAuthAuthorize(request: Request, env: Env, provider: string) {
+async function handleOAuthAuthorize(request: Request, env: Env, provider: string, isResetMode: boolean) {
 	const providerKey = provider as OAuthProvider;
 	if (!OAUTH_PROVIDERS[providerKey]) {
 		return jsonError("Unsupported OAuth provider", 400);
@@ -370,14 +397,14 @@ async function handleOAuthAuthorize(request: Request, env: Env, provider: string
 		status: 302,
 		headers: {
 			Location: authUrl,
-			"Set-Cookie": `oauth_state=${state}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${60 * 10}`,
+			"Set-Cookie": `oauth_state=${state}${isResetMode ? ";reset=true" : ""}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${60 * 10}`,
 		},
 	});
 
 	return response;
 }
 
-async function handleOAuthCallback(request: Request, env: Env, provider: string) {
+async function handleOAuthCallback(request: Request, env: Env, provider: string, isResetMode: boolean) {
 	const providerKey = provider as OAuthProvider;
 	if (!OAUTH_PROVIDERS[providerKey]) {
 		return jsonError("Unsupported OAuth provider", 400);
@@ -399,6 +426,8 @@ async function handleOAuthCallback(request: Request, env: Env, provider: string)
 
 	const cookie = request.headers.get("Cookie");
 	const savedState = cookie?.match(/oauth_state=([^;]+)/)?.[1];
+	const isResetCookie = cookie?.match(/oauth_state=[^;]+;reset=([^;]+)/)?.[1] === "true";
+	const resetMode = isResetMode || isResetCookie;
 	if (!savedState || savedState !== state) {
 		return new Response(renderOAuthError("Invalid state parameter. Possible CSRF attack."), { headers: { "content-type": "text/html" } });
 	}
@@ -417,6 +446,18 @@ async function handleOAuthCallback(request: Request, env: Env, provider: string)
 		).bind(providerKey, userInfo.providerId).first() as Record<string, string | number> | null;
 
 		if (existingOAuth) {
+			if (resetMode) {
+				const resetToken = generateSessionToken();
+				const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+				await env.DB.prepare("INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES (?, ?, ?)").bind(existingOAuth.id, resetToken, expiresAt).run();
+				return new Response(null, {
+					status: 302,
+					headers: {
+						Location: `/reset-password?token=${resetToken}`,
+					},
+				});
+			}
+
 			const sessionToken = generateSessionToken();
 			await env.DB.prepare("UPDATE users SET session_token = ? WHERE id = ?").bind(sessionToken, existingOAuth.id).run();
 
@@ -438,6 +479,10 @@ async function handleOAuthCallback(request: Request, env: Env, provider: string)
 					"Set-Cookie": `session=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${60 * 60 * 24 * 7}`,
 				},
 			});
+		}
+
+		if (resetMode) {
+			return new Response(renderOAuthError("User not found. Please login first before resetting password."), { headers: { "content-type": "text/html" } });
 		}
 
 		const userCount = await env.DB.prepare("SELECT COUNT(*) as count FROM users").first() as Record<string, number>;
@@ -488,6 +533,112 @@ async function handleOAuthCallback(request: Request, env: Env, provider: string)
 		});
 	} catch (err) {
 		return new Response(renderOAuthError(`OAuth login failed: ${(err as Error).message}`), { headers: { "content-type": "text/html" } });
+	}
+}
+
+async function handleChangePassword(request: Request, env: Env, userId: number) {
+	try {
+		const body = await request.json<{ currentPassword: string; newPassword: string }>();
+		if (!body.currentPassword?.trim() || !body.newPassword?.trim()) {
+			return jsonError("Current password and new password are required", 400);
+		}
+		if (body.newPassword.length < 6) {
+			return jsonError("New password must be at least 6 characters", 400);
+		}
+
+		const user = await env.DB.prepare("SELECT password_hash FROM users WHERE id = ?").bind(userId).first() as Record<string, string> | null;
+		if (!user) {
+			return jsonError("User not found", 404);
+		}
+
+		if (!(await verifyPassword(body.currentPassword, user.password_hash))) {
+			return jsonError("Current password is incorrect", 401);
+		}
+
+		const newPasswordHash = await hashPassword(body.newPassword);
+		await env.DB.prepare("UPDATE users SET password_hash = ? WHERE id = ?").bind(newPasswordHash, userId).run();
+
+		return jsonResponse({ message: "Password changed successfully" });
+	} catch (err) {
+		return jsonError("Failed to change password", 500);
+	}
+}
+
+async function verifyTurnstile(token: string, env: Env): Promise<boolean> {
+	const secret = env.TURNSTILE_SECRET_KEY
+	if (!secret) return true
+	const res = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ secret, response: token }),
+	})
+	const data = (await res.json()) as { success: boolean }
+	return data.success
+}
+
+async function handleRequestPasswordReset(request: Request, env: Env) {
+	try {
+		const body = await request.json<{ username: string; provider: OAuthProvider; turnstileToken?: string }>()
+		if (!body.username?.trim()) {
+			return jsonError("Username is required", 400)
+		}
+		if (!body.provider || !OAUTH_PROVIDERS[body.provider]) {
+			return jsonError("Valid OAuth provider is required", 400)
+		}
+		if (env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET_KEY) {
+			if (!body.turnstileToken) {
+				return jsonError("请完成人机验证", 400)
+			}
+			const verified = await verifyTurnstile(body.turnstileToken, env)
+			if (!verified) {
+				return jsonError("人机验证失败", 400)
+			}
+		}
+
+		const user = await env.DB.prepare(
+			"SELECT u.id FROM users u JOIN oauth_users o ON u.id = o.user_id WHERE u.username = ? AND o.provider = ?"
+		).bind(body.username.trim(), body.provider).first() as Record<string, number> | null
+
+		if (!user) {
+			return jsonError("No OAuth account found for this username and provider", 404)
+		}
+
+		const resetToken = generateSessionToken()
+		const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString()
+		await env.DB.prepare("INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES (?, ?, ?)").bind(user.id, resetToken, expiresAt).run()
+
+		return jsonResponse({ token: resetToken, redirectUrl: `/reset-password?token=${resetToken}` })
+	} catch (err) {
+		return jsonError("Failed to request password reset", 500)
+	}
+}
+
+async function handlePasswordReset(request: Request, env: Env) {
+	try {
+		const body = await request.json<{ token: string; newPassword: string }>();
+		if (!body.token?.trim() || !body.newPassword?.trim()) {
+			return jsonError("Token and new password are required", 400);
+		}
+
+		if (body.newPassword.length < 6) {
+			return jsonError("Password must be at least 6 characters", 400);
+		}
+
+		const record = await env.DB.prepare(
+			"SELECT user_id FROM password_reset_tokens WHERE token = ? AND expires_at > datetime('now') ORDER BY created_at DESC LIMIT 1"
+		).bind(body.token.trim()).first() as Record<string, number> | null;
+
+		if (!record) {
+			return jsonError("Invalid or expired reset token", 400);
+		}
+
+		const newPasswordHash = await hashPassword(body.newPassword);
+		await env.DB.prepare("UPDATE users SET password_hash = ?, session_token = NULL WHERE id = ?").bind(newPasswordHash, record.user_id).run();
+		await env.DB.prepare("DELETE FROM password_reset_tokens WHERE user_id = ?").bind(record.user_id).run();
+
+		return jsonResponse({ message: "Password reset successfully. Please login with your new password." });
+	} catch (err) {
+		return jsonError("Failed to reset password", 500);
 	}
 }
 
@@ -789,15 +940,11 @@ async function handleGetSettings(env: Env) {
 		const settings: Record<string, string> = {
 			registration_enabled: await getSetting(env, "registration_enabled"),
 			email_verification_required: await getSetting(env, "email_verification_required"),
-			email_provider: await getSetting(env, "email_provider"),
-			email_api_key: await getSetting(env, "email_api_key"),
 			smtp_host: await getSetting(env, "smtp_host"),
 			smtp_port: await getSetting(env, "smtp_port"),
 			smtp_user: await getSetting(env, "smtp_user"),
 			smtp_from: await getSetting(env, "smtp_from"),
 			test_email_recipient: await getSetting(env, "test_email_recipient"),
-			wecom_corp_id: await getSetting(env, "wecom_corp_id"),
-			lark_user_mailbox_id: await getSetting(env, "lark_user_mailbox_id"),
 		};
 
 		for (const provider of oauthProviders) {
@@ -821,9 +968,8 @@ async function handleUpdateSettings(request: Request, env: Env) {
 		const microsoftExtraFields = ["tenant"];
 
 		const allowedKeys = [
-			"registration_enabled", "email_verification_required", "email_provider", "email_api_key",
+			"registration_enabled", "email_verification_required",
 			"smtp_host", "smtp_port", "smtp_user", "smtp_pass", "smtp_from", "test_email_recipient",
-			"wecom_corp_id", "wecom_app_secret", "lark_user_access_token", "lark_user_mailbox_id",
 		];
 
 		for (const provider of oauthProviders) {
@@ -845,25 +991,15 @@ async function handleUpdateSettings(request: Request, env: Env) {
 
 async function handleTestSmtp(request: Request, env: Env) {
 	try {
-		const provider = await getSetting(env, "email_provider");
-		const apiKey = await getSetting(env, "email_api_key");
+		const smtpHost = await getSetting(env, "smtp_host");
+		const smtpPort = await getSetting(env, "smtp_port");
+		const smtpUser = await getSetting(env, "smtp_user");
+		const smtpPass = await getSetting(env, "smtp_pass");
 		const from = await getSetting(env, "smtp_from");
 		const recipient = await getSetting(env, "test_email_recipient");
-		const wecomCorpId = await getSetting(env, "wecom_corp_id");
-		const wecomAppSecret = await getSetting(env, "wecom_app_secret");
 
-		if (!provider) {
-			return jsonError("Please select an email provider", 400);
-		}
-
-		if (provider === "wecom") {
-			if (!wecomCorpId || !wecomAppSecret) {
-				return jsonError("Please fill in WeCom Corp ID and App Secret", 400);
-			}
-		} else if (provider === "custom_smtp") {
-			return jsonError("Cloudflare Workers cannot directly connect to SMTP servers. Please use an HTTP API provider.", 400);
-		} else if (!apiKey) {
-			return jsonError("Please fill in API key", 400);
+		if (!smtpHost || !smtpPort || !smtpUser || !smtpPass || !from) {
+			return jsonError("Please fill in all SMTP fields", 400);
 		}
 
 		if (!recipient && !from) {
@@ -895,16 +1031,19 @@ async function handleSendEmailCode(request: Request, env: Env, userId: number) {
 		const code = Math.floor(100000 + Math.random() * 900000).toString();
 		const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 		await env.DB.prepare("INSERT INTO email_verification_codes (user_id, email, code, expires_at) VALUES (?, ?, ?, ?)").bind(userId, email, code, expiresAt).run();
-		const provider = await getSetting(env, "email_provider");
-		const apiKey = await getSetting(env, "email_api_key");
-		if (provider && apiKey) {
+		const smtpHost = await getSetting(env, "smtp_host");
+		const smtpPort = await getSetting(env, "smtp_port");
+		const smtpUser = await getSetting(env, "smtp_user");
+		const smtpPass = await getSetting(env, "smtp_pass");
+		const from = await getSetting(env, "smtp_from");
+		if (smtpHost && smtpPort && smtpUser && smtpPass && from) {
 			const result = await sendEmail(email, "邮箱验证码", `<p>您的验证码是：<strong>${code}</strong></p><p>有效期10分钟。</p>`, env);
 			if (!result.success) {
 				return jsonError(result.error || "Failed to send email", 500);
 			}
 			return jsonResponse({ message: "Verification code sent to your email" });
 		}
-		return jsonResponse({ message: "Email provider not configured. For testing, your code is: " + code });
+		return jsonResponse({ message: "SMTP not configured. For testing, your code is: " + code });
 	} catch (err) {
 		return jsonError("Failed to send verification code", 500);
 	}
