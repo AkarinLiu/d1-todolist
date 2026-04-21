@@ -70,7 +70,18 @@ export function renderHtml(username: string, isAdmin: boolean) {
 		.filter-item .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
 		.filter-group-header { display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0; cursor: pointer; font-size: 0.875rem; font-weight: 600; color: #333; }
 		.filter-group-header:hover { color: #0E838F; }
+		.filter-group-header .group-actions { display: flex; gap: 0.25rem; }
+		.filter-group-header .group-actions button { padding: 0.1rem 0.3rem; border: none; border-radius: 3px; cursor: pointer; font-size: 0.65rem; background: transparent; color: #999; }
+		.filter-group-header .group-actions button:hover { background: #eee; color: #333; }
+		.filter-group-header .group-actions button.delete:hover { background: #fde8e8; color: #c53030; }
 		.filter-group-items { padding-left: 1rem; }
+		.add-group-btn { display: flex; align-items: center; justify-content: center; width: 100%; padding: 0.4rem; border: 1px dashed #ccc; border-radius: 6px; background: transparent; color: #999; cursor: pointer; font-size: 0.8rem; margin-top: 0.5rem; transition: all 0.2s; }
+		.add-group-btn:hover { border-color: #0E838F; color: #0E838F; background: #f0fafa; }
+		.group-input-inline { display: flex; gap: 0.3rem; margin-top: 0.5rem; }
+		.group-input-inline input { flex: 1; padding: 0.3rem 0.5rem; border: 1px solid #ddd; border-radius: 4px; font-size: 0.8rem; }
+		.group-input-inline button { padding: 0.3rem 0.6rem; border: none; border-radius: 4px; cursor: pointer; font-size: 0.75rem; }
+		.group-input-inline .confirm { background: #0E838F; color: white; }
+		.group-input-inline .cancel { background: #eee; color: #666; }
 		.tag-modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
 		.tag-modal { background: white; border-radius: 12px; padding: 1.5rem; width: 90%; max-width: 400px; max-height: 80vh; overflow-y: auto; }
 		.tag-modal h3 { margin-bottom: 1rem; color: #333; }
@@ -80,6 +91,7 @@ export function renderHtml(username: string, isAdmin: boolean) {
 		.tag-modal .tag-option input[type="checkbox"] { accent-color: #0E838F; }
 		.tag-modal .new-tag-input { display: flex; gap: 0.5rem; margin-top: 1rem; }
 		.tag-modal .new-tag-input input { flex: 1; padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px; }
+		.tag-modal .new-tag-input select { padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px; font-size: 0.875rem; }
 		.tag-modal .new-tag-input button { padding: 0.5rem 1rem; background: #4caf50; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 0.875rem; }
 		.tag-modal .close-btn { margin-top: 1rem; width: 100%; padding: 0.75rem; background: #666; color: white; border: none; border-radius: 6px; cursor: pointer; }
 		.tag-modal .group-label { font-size: 0.75rem; color: #999; margin-top: 0.75rem; margin-bottom: 0.25rem; font-weight: 600; }
@@ -96,6 +108,8 @@ export function renderHtml(username: string, isAdmin: boolean) {
 			<div class="filter-section">
 				<h3>标签分组</h3>
 				<div id="groupFilters"></div>
+				<button class="add-group-btn" onclick="showAddGroupInput()">+ 新建分组</button>
+				<div id="addGroupForm" style="display: none;"></div>
 			</div>
 		</div>
 		<div class="main">
@@ -124,6 +138,7 @@ export function renderHtml(username: string, isAdmin: boolean) {
 			<div id="tagOptions"></div>
 			<div class="new-tag-input">
 				<input type="text" id="newTagInput" placeholder="输入新标签名称..." />
+				<select id="newTagGroup"><option value="">无分组</option></select>
 				<button onclick="createNewTag()">创建</button>
 			</div>
 			<button class="close-btn" onclick="closeTagModal()">关闭</button>
@@ -147,6 +162,7 @@ export function renderHtml(username: string, isAdmin: boolean) {
 		let allTodos = [];
 		let currentFilter = { type: "all", id: null };
 		let currentTagTodoId = null;
+		let editingGroupId = null;
 
 		async function fetchData() {
 			const [todosRes, tagsRes, groupsRes] = await Promise.all([
@@ -178,16 +194,101 @@ export function renderHtml(username: string, isAdmin: boolean) {
 						<span>\${escapeHtml(tag.name)}</span>
 					</div>
 				\`).join("");
+				const isEditing = editingGroupId === group.id;
+				const nameHtml = isEditing
+					? \`<input type="text" id="editGroupInput-\${group.id}" value="\${escapeHtml(group.name)}" style="flex:1;padding:0.2rem 0.4rem;border:1px solid #ddd;border-radius:3px;font-size:0.875rem;" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter')saveGroupEdit(\${group.id})" />\`
+					: \`<span>\${escapeHtml(group.name)}</span>\`;
+				const actionsHtml = isEditing
+					? \`<div class="group-actions">
+							<button onclick="event.stopPropagation();saveGroupEdit(\${group.id})">✓</button>
+							<button class="cancel" onclick="event.stopPropagation();cancelGroupEdit()">✗</button>
+						</div>\`
+					: \`<div class="group-actions">
+							<button onclick="event.stopPropagation();startGroupEdit(\${group.id})">✎</button>
+							<button class="delete" onclick="event.stopPropagation();deleteGroup(\${group.id})">✕</button>
+						</div>\`;
 				return \`
 					<div>
 						<div class="filter-group-header" onclick="setFilter('group', \${group.id})">
-							<span>\${escapeHtml(group.name)}</span>
+							\${nameHtml}
+							\${actionsHtml}
 						</div>
 						<div class="filter-group-items">\${tagsHtml}</div>
 					</div>
 				\`;
 			}).join("");
 		}
+
+		window.showAddGroupInput = function() {
+			const form = document.getElementById("addGroupForm");
+			form.innerHTML = \`<div class="group-input-inline">
+				<input type="text" id="newGroupInput" placeholder="分组名称..." onkeydown="if(event.key==='Enter')createGroup()" />
+				<button class="confirm" onclick="createGroup()">✓</button>
+				<button class="cancel" onclick="hideAddGroupInput()">✗</button>
+			</div>\`;
+			form.style.display = "block";
+			document.getElementById("newGroupInput").focus();
+		};
+
+		window.hideAddGroupInput = function() {
+			document.getElementById("addGroupForm").style.display = "none";
+			document.getElementById("addGroupForm").innerHTML = "";
+		};
+
+		window.createGroup = async function() {
+			const input = document.getElementById("newGroupInput");
+			const name = input.value.trim();
+			if (!name) return;
+			const res = await fetch("/api/tag-groups", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ name })
+			});
+			if (res.ok) {
+				hideAddGroupInput();
+				await fetchData();
+			}
+		};
+
+		window.startGroupEdit = function(id) {
+			editingGroupId = id;
+			renderFilters();
+			setTimeout(() => {
+				const el = document.getElementById("editGroupInput-" + id);
+				if (el) { el.focus(); el.select(); }
+			}, 0);
+		};
+
+		window.saveGroupEdit = async function(id) {
+			const input = document.getElementById("editGroupInput-" + id);
+			const name = input.value.trim();
+			if (!name) return;
+			const res = await fetch("/api/tag-groups/" + id, {
+				method: "PUT",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ name })
+			});
+			if (res.ok) {
+				editingGroupId = null;
+				await fetchData();
+			}
+		};
+
+		window.cancelGroupEdit = function() {
+			editingGroupId = null;
+			renderFilters();
+		};
+
+		window.deleteGroup = async function(id) {
+			if (!confirm("删除分组后，该分组下的标签将变为无分组标签，是否继续？")) return;
+			const res = await fetch("/api/tag-groups/" + id, { method: "DELETE" });
+			if (res.ok) {
+				if (currentFilter.type === "group" && currentFilter.id === id) {
+					currentFilter = { type: "all", id: null };
+				}
+				await fetchData();
+			}
+		};
 
 		window.setFilter = function(type, id) {
 			currentFilter = { type, id };
@@ -260,6 +361,9 @@ export function renderHtml(username: string, isAdmin: boolean) {
 			const todo = allTodos.find(t => t.id === todoId);
 			const selectedTagIds = (todo && todo.tags) ? todo.tags.map(t => t.id) : [];
 
+			const groupSelect = document.getElementById("newTagGroup");
+			groupSelect.innerHTML = '<option value="">无分组</option>' + allGroups.map(g => \`<option value="\${g.id}">\${escapeHtml(g.name)}</option>\`).join("");
+
 			let html = "";
 			const groupedTags = {};
 			allTags.forEach(tag => {
@@ -322,14 +426,16 @@ export function renderHtml(username: string, isAdmin: boolean) {
 
 		window.createNewTag = async function() {
 			const input = document.getElementById("newTagInput");
+			const groupSelect = document.getElementById("newTagGroup");
 			const name = input.value.trim();
 			if (!name) return;
 			const colors = ["#0E838F", "#2196f3", "#9c27b0", "#ff9800", "#4caf50", "#f44336", "#795548", "#607d8b"];
 			const color = colors[Math.floor(Math.random() * colors.length)];
+			const groupId = groupSelect.value ? parseInt(groupSelect.value) : null;
 			const res = await fetch("/api/tags", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ name, color })
+				body: JSON.stringify({ name, color, group_id: groupId })
 			});
 			if (res.ok) {
 				input.value = "";
