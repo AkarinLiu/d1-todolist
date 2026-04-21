@@ -32,15 +32,16 @@ export default {
 			}
 			const userCount = await env.DB.prepare("SELECT COUNT(*) as count FROM users").first() as Record<string, number>;
 			const hasUsers = (userCount?.count ?? 0) > 0;
-			const oauthProviders = await getEnabledOAuthProviders(env);
-			if (!hasUsers && oauthProviders.length === 0) {
-				return new Response(renderSetupPage(), {
-					headers: { "content-type": "text/html" },
-				});
-			}
-			return new Response(renderAuthPage(oauthProviders, env.TURNSTILE_SITE_KEY || ""), {
+		const oauthProviders = await getEnabledOAuthProviders(env);
+		const registrationEnabled = await getSetting(env, "registration_enabled");
+		if (!hasUsers && oauthProviders.length === 0) {
+			return new Response(renderSetupPage(), {
 				headers: { "content-type": "text/html" },
 			});
+		}
+		return new Response(renderAuthPage(oauthProviders, env.TURNSTILE_SITE_KEY || "", registrationEnabled === "true"), {
+			headers: { "content-type": "text/html" },
+		});
 		}
 
 		if (path === "/setup" && method === "GET") {
@@ -123,11 +124,12 @@ export default {
 		if (path === "/reset-password" && method === "GET") {
 			const token = url.searchParams.get("token");
 			if (!token) {
-				return new Response(renderAuthPage(await getEnabledOAuthProviders(env), env.TURNSTILE_SITE_KEY || ""), {
+				const registrationEnabled = await getSetting(env, "registration_enabled");
+				return new Response(renderAuthPage(await getEnabledOAuthProviders(env), env.TURNSTILE_SITE_KEY || "", registrationEnabled === "true"), {
 					headers: { "content-type": "text/html" },
 				});
 			}
-			return new Response(renderPasswordResetPage(token), {
+			return new Response(renderPasswordResetPage(token, env.TURNSTILE_SITE_KEY || ""), {
 				headers: { "content-type": "text/html" },
 			});
 		}
@@ -386,9 +388,18 @@ async function handleRegisterSendCode(request: Request, env: Env) {
 			return jsonError("Registration is disabled", 403);
 		}
 
-		const body = await request.json<{ username: string; password: string; email: string }>();
+		const body = await request.json<{ username: string; password: string; email: string; turnstileToken?: string }>();
 		if (!body.username?.trim() || !body.password?.trim() || !body.email?.trim()) {
 			return jsonError("Username, password and email are required", 400);
+		}
+		if (env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET_KEY) {
+			if (!body.turnstileToken) {
+				return jsonError("请完成人机验证", 400);
+			}
+			const verified = await verifyTurnstile(body.turnstileToken, env);
+			if (!verified) {
+				return jsonError("人机验证失败", 400);
+			}
 		}
 		if (body.password.length < 6) {
 			return jsonError("Password must be at least 6 characters", 400);
@@ -469,9 +480,18 @@ async function handleRegisterVerify(request: Request, env: Env) {
 
 async function handleForgotPassword(request: Request, env: Env) {
 	try {
-		const body = await request.json<{ username: string }>();
+		const body = await request.json<{ username: string; turnstileToken?: string }>();
 		if (!body.username?.trim()) {
 			return jsonError("Username is required", 400);
+		}
+		if (env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET_KEY) {
+			if (!body.turnstileToken) {
+				return jsonError("请完成人机验证", 400);
+			}
+			const verified = await verifyTurnstile(body.turnstileToken, env);
+			if (!verified) {
+				return jsonError("人机验证失败", 400);
+			}
 		}
 
 		const user = await env.DB.prepare("SELECT id, email, email_verified FROM users WHERE username = ?").bind(body.username.trim()).first() as Record<string, string | number> | null;
@@ -509,12 +529,21 @@ async function handleForgotPassword(request: Request, env: Env) {
 
 async function handleResetPasswordByCode(request: Request, env: Env) {
 	try {
-		const body = await request.json<{ username: string; code: string; newPassword: string }>();
+		const body = await request.json<{ username: string; code: string; newPassword: string; turnstileToken?: string }>();
 		if (!body.username?.trim() || !body.code?.trim() || !body.newPassword?.trim()) {
 			return jsonError("Username, code and new password are required", 400);
 		}
 		if (body.newPassword.length < 6) {
 			return jsonError("Password must be at least 6 characters", 400);
+		}
+		if (env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET_KEY) {
+			if (!body.turnstileToken) {
+				return jsonError("请完成人机验证", 400);
+			}
+			const verified = await verifyTurnstile(body.turnstileToken, env);
+			if (!verified) {
+				return jsonError("人机验证失败", 400);
+			}
 		}
 
 		const user = await env.DB.prepare("SELECT id FROM users WHERE username = ?").bind(body.username.trim()).first() as Record<string, number> | null;
@@ -672,6 +701,11 @@ async function handleOAuthCallback(request: Request, env: Env, provider: string,
 			return new Response(renderOAuthError("User not found. Please login first before resetting password."), { headers: { "content-type": "text/html" } });
 		}
 
+		const registrationEnabled = await getSetting(env, "registration_enabled");
+		if (registrationEnabled !== "true") {
+			return new Response(renderOAuthError("Registration is disabled"), { headers: { "content-type": "text/html" } });
+		}
+
 		const userCount = await env.DB.prepare("SELECT COUNT(*) as count FROM users").first() as Record<string, number>;
 		const isAdmin = (userCount?.count ?? 0) === 0 ? 1 : 0;
 
@@ -802,13 +836,22 @@ async function handleRequestPasswordReset(request: Request, env: Env) {
 
 async function handlePasswordReset(request: Request, env: Env) {
 	try {
-		const body = await request.json<{ token: string; newPassword: string }>();
+		const body = await request.json<{ token: string; newPassword: string; turnstileToken?: string }>();
 		if (!body.token?.trim() || !body.newPassword?.trim()) {
 			return jsonError("Token and new password are required", 400);
 		}
 
 		if (body.newPassword.length < 6) {
 			return jsonError("Password must be at least 6 characters", 400);
+		}
+		if (env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET_KEY) {
+			if (!body.turnstileToken) {
+				return jsonError("请完成人机验证", 400);
+			}
+			const verified = await verifyTurnstile(body.turnstileToken, env);
+			if (!verified) {
+				return jsonError("人机验证失败", 400);
+			}
 		}
 
 		const record = await env.DB.prepare(

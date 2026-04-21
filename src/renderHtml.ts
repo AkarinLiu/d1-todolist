@@ -620,8 +620,8 @@ export function renderHtml(username: string, isAdmin: boolean) {
 </html>`;
 }
 
-export function renderAuthPage(oauthProviders: Array<{ key: string; name: string; icon: string }>, turnstileSiteKey: string) {
-	const turnstileWidget = turnstileSiteKey ? `<div class="cf-turnstile" data-sitekey="${turnstileSiteKey}" data-theme="light"></div>` : "";
+export function renderAuthPage(oauthProviders: Array<{ key: string; name: string; icon: string }>, turnstileSiteKey: string, registrationEnabled: boolean) {
+	const turnstileWidget = (id: string) => turnstileSiteKey ? `<div class="cf-turnstile" id="${id}" data-sitekey="${turnstileSiteKey}" data-theme="light"></div>` : "";
 	const turnstileScript = turnstileSiteKey ? '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>' : "";
 	return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -679,11 +679,12 @@ export function renderAuthPage(oauthProviders: Array<{ key: string; name: string
 			</div>
 			<button type="submit" class="submit-btn">登录</button>
 			<div class="link-group">
-				<a href="#" onclick="showRegisterForm(); return false;">注册账号</a>
+				${registrationEnabled ? `<a href="#" onclick="showRegisterForm(); return false;">注册账号</a>` : ""}
 				<a href="#" onclick="showForgotForm(); return false;">忘记密码</a>
 			</div>
 		</form>
 
+		${registrationEnabled ? `
 		<!-- 注册表单 -->
 		<form id="registerForm" style="display: none;">
 			<div class="form-group">
@@ -702,6 +703,7 @@ export function renderAuthPage(oauthProviders: Array<{ key: string; name: string
 				<label>确认密码</label>
 				<input type="password" id="regConfirmPassword" required />
 			</div>
+			<div class="turnstile-container">${turnstileWidget("ts-register")}</div>
 			<button type="submit" class="submit-btn">发送验证码</button>
 			<div class="back-link">
 				<a href="#" onclick="showLoginForm(); return false;">已有账号？返回登录</a>
@@ -720,6 +722,7 @@ export function renderAuthPage(oauthProviders: Array<{ key: string; name: string
 				<a href="#" onclick="showRegisterForm(); return false;">返回上一步</a>
 			</div>
 		</div>
+		` : ""}
 
 		<!-- 忘记密码表单 -->
 		<div id="forgotSection" class="hidden-section">
@@ -728,6 +731,7 @@ export function renderAuthPage(oauthProviders: Array<{ key: string; name: string
 				<label>用户名</label>
 				<input type="text" id="forgotUsername" placeholder="输入你的用户名" />
 			</div>
+			<div class="turnstile-container">${turnstileWidget("ts-forgot")}</div>
 			<button class="submit-btn" onclick="sendForgotCode()">发送验证码</button>
 			<div class="back-link">
 				<a href="#" onclick="showLoginForm(); return false;">返回登录</a>
@@ -760,6 +764,8 @@ export function renderAuthPage(oauthProviders: Array<{ key: string; name: string
 		<p class="success-msg" id="successMsg"></p>
 	</div>
 	<script>
+		const turnstileSiteKey = ${turnstileSiteKey ? `"${turnstileSiteKey}"` : "null"};
+		const registrationEnabled = ${registrationEnabled};
 		const loginForm = document.getElementById("loginForm");
 		const registerForm = document.getElementById("registerForm");
 		const regVerifySection = document.getElementById("regVerifySection");
@@ -799,6 +805,7 @@ export function renderAuthPage(oauthProviders: Array<{ key: string; name: string
 		}
 
 		function showRegisterForm() {
+			if (!registrationEnabled) { showError("注册已关闭"); return; }
 			loginForm.style.display = "none";
 			registerForm.style.display = "block";
 			regVerifySection.style.display = "none";
@@ -859,9 +866,11 @@ export function renderAuthPage(oauthProviders: Array<{ key: string; name: string
 			if (!username || !password || !email) { showError("用户名、邮箱和密码不能为空"); return; }
 			if (password.length < 6) { showError("密码长度至少6位"); return; }
 			if (password !== confirm) { showError("两次输入的密码不一致"); return; }
-			const res = await fetch("/api/auth/register/send-code", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, password, email }) });
+			const turnstileToken = turnstileSiteKey ? turnstile.getResponse("ts-register") : undefined;
+			if (turnstileSiteKey && !turnstileToken) { showError("请完成人机验证"); return; }
+			const res = await fetch("/api/auth/register/send-code", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, password, email, turnstileToken }) });
 			const data = await res.json();
-			if (!res.ok) { showError(data.error); return; }
+			if (!res.ok) { showError(data.error); if (turnstileSiteKey) turnstile.reset("ts-register"); return; }
 			regEmailCache = email;
 			showSuccess(data.message);
 			setTimeout(showRegVerifyForm, 1500);
@@ -880,9 +889,11 @@ export function renderAuthPage(oauthProviders: Array<{ key: string; name: string
 		async function sendForgotCode() {
 			const username = document.getElementById("forgotUsername").value.trim();
 			if (!username) { showError("请输入用户名"); return; }
-			const res = await fetch("/api/auth/forgot-password", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username }) });
+			const turnstileToken = turnstileSiteKey ? turnstile.getResponse("ts-forgot") : undefined;
+			if (turnstileSiteKey && !turnstileToken) { showError("请完成人机验证"); return; }
+			const res = await fetch("/api/auth/forgot-password", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, turnstileToken }) });
 			const data = await res.json();
-			if (!res.ok) { showError(data.error); return; }
+			if (!res.ok) { showError(data.error); if (turnstileSiteKey) turnstile.reset("ts-forgot"); return; }
 			forgotUsernameCache = username;
 			showSuccess(data.message);
 			setTimeout(showResetCodeForm, 1500);
@@ -1285,7 +1296,7 @@ export function renderPublicPage(username: string) {
 </html>`;
 }
 
-export function renderPasswordResetPage(token: string) {
+export function renderPasswordResetPage(token: string, turnstileSiteKey: string) {
 	return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -1312,6 +1323,7 @@ export function renderPasswordResetPage(token: string) {
 		.password-strength .medium { width: 66%; background: #faad14; }
 		.password-strength .strong { width: 100%; background: #52c41a; }
 	</style>
+	${turnstileSiteKey ? '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>' : ""}
 </head>
 <body>
 	<div class="reset-container">
@@ -1327,12 +1339,14 @@ export function renderPasswordResetPage(token: string) {
 				<label>确认密码</label>
 				<input type="password" id="confirmPassword" required />
 			</div>
+			${turnstileSiteKey ? `<div class="turnstile-container"><div class="cf-turnstile" id="ts-reset" data-sitekey="${turnstileSiteKey}" data-theme="light"></div></div>` : ""}
 			<button type="submit" class="submit-btn">设置新密码</button>
 		</form>
 		<p class="error-msg" id="errorMsg"></p>
 		<p class="success-msg" id="successMsg"></p>
 	</div>
 	<script>
+		const turnstileSiteKey = ${turnstileSiteKey ? `"${turnstileSiteKey}"` : "null"};
 		const resetForm = document.getElementById("resetForm");
 		const errorMsg = document.getElementById("errorMsg");
 		const successMsg = document.getElementById("successMsg");
@@ -1359,10 +1373,12 @@ export function renderPasswordResetPage(token: string) {
 			const confirm = confirmPassword.value;
 			if (pw !== confirm) { showError("两次输入的密码不一致"); return; }
 			if (pw.length < 6) { showError("密码长度至少6位"); return; }
+			const turnstileToken = turnstileSiteKey ? turnstile.getResponse("ts-reset") : undefined;
+			if (turnstileSiteKey && !turnstileToken) { showError("请完成人机验证"); return; }
 
-			const res = await fetch("/api/auth/reset-password", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token, newPassword: pw }) });
+			const res = await fetch("/api/auth/reset-password", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token, newPassword: pw, turnstileToken }) });
 			const data = await res.json();
-			if (!res.ok) { showError(data.error); return; }
+			if (!res.ok) { showError(data.error); if (turnstileSiteKey) turnstile.reset("ts-reset"); return; }
 			successMsg.textContent = "密码重置成功！正在跳转至登录页...";
 			successMsg.style.display = "block";
 			setTimeout(() => { window.location.href = "/"; }, 2000);
