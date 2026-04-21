@@ -68,6 +68,13 @@ export function renderHtml(username: string, isAdmin: boolean) {
 		.filter-item:hover { color: #0E838F; }
 		.filter-item.active { color: #0E838F; font-weight: 600; }
 		.filter-item .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+		.filter-item .tag-name { flex: 1; }
+		.filter-item .tag-actions { display: flex; gap: 0.15rem; opacity: 0; transition: opacity 0.2s; }
+		.filter-item:hover .tag-actions { opacity: 1; }
+		.filter-item .tag-actions button { padding: 0.1rem 0.3rem; border: none; border-radius: 3px; cursor: pointer; font-size: 0.65rem; background: transparent; color: #999; }
+		.filter-item .tag-actions button:hover { background: #eee; color: #333; }
+		.filter-item .tag-actions button.delete:hover { background: #fde8e8; color: #c53030; }
+		.filter-item .tag-actions select { padding: 0.1rem; border: 1px solid #ddd; border-radius: 3px; font-size: 0.65rem; background: white; }
 		.filter-group-header { display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0; cursor: pointer; font-size: 0.875rem; font-weight: 600; color: #333; }
 		.filter-group-header:hover { color: #0E838F; }
 		.filter-group-header .group-actions { display: flex; gap: 0.25rem; }
@@ -179,12 +186,22 @@ export function renderHtml(username: string, isAdmin: boolean) {
 		}
 
 		function renderFilters() {
-			tagFilters.innerHTML = allTags.map(tag => \`
-				<div class="filter-item" data-filter="tag" data-id="\${tag.id}" onclick="setFilter('tag', \${tag.id})">
-					<span class="dot" style="background: \${tag.color}"></span>
-					<span>\${escapeHtml(tag.name)}</span>
-				</div>
-			\`).join("");
+			tagFilters.innerHTML = allTags.map(tag => {
+				const groupOptions = allGroups.map(g => \`<option value="\${g.id}" \${tag.group_id === g.id ? 'selected' : ''}>\${escapeHtml(g.name)}</option>\`).join("");
+				return \`
+					<div class="filter-item" data-filter="tag" data-id="\${tag.id}" onclick="setFilter('tag', \${tag.id})">
+						<span class="dot" style="background: \${tag.color}"></span>
+						<span class="tag-name">\${escapeHtml(tag.name)}</span>
+						<div class="tag-actions">
+							<select onclick="event.stopPropagation()" onchange="changeTagGroup(\${tag.id}, this.value)">
+								<option value="">无分组</option>
+								\${groupOptions}
+							</select>
+							<button class="delete" onclick="event.stopPropagation();deleteTag(\${tag.id})">✕</button>
+						</div>
+					</div>
+				\`;
+			}).join("");
 
 			groupFilters.innerHTML = allGroups.map(group => {
 				const groupTags = allTags.filter(t => t.group_id === group.id);
@@ -286,6 +303,29 @@ export function renderHtml(username: string, isAdmin: boolean) {
 				if (currentFilter.type === "group" && currentFilter.id === id) {
 					currentFilter = { type: "all", id: null };
 				}
+				await fetchData();
+			}
+		};
+
+		window.deleteTag = async function(id) {
+			if (!confirm("确定删除该标签？已关联的待办将移除该标签。")) return;
+			const res = await fetch("/api/tags/" + id, { method: "DELETE" });
+			if (res.ok) {
+				if (currentFilter.type === "tag" && currentFilter.id === id) {
+					currentFilter = { type: "all", id: null };
+				}
+				await fetchData();
+			}
+		};
+
+		window.changeTagGroup = async function(tagId, groupId) {
+			const gid = groupId ? parseInt(groupId) : null;
+			const res = await fetch("/api/tags/" + tagId, {
+				method: "PUT",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ group_id: gid })
+			});
+			if (res.ok) {
 				await fetchData();
 			}
 		};
