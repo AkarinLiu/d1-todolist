@@ -147,7 +147,7 @@ export default {
 
 		if (path === "/api/todos") {
 			if (method === "GET") {
-				return handleGetTodos(env, user.id);
+				return handleGetTodos(env, user.id, url.searchParams);
 			}
 			if (method === "POST") {
 				return handleCreateTodo(request, env, user.id);
@@ -166,6 +166,17 @@ export default {
 			}
 			if (method === "DELETE") {
 				return handleDeleteTodo(env, user.id, id);
+			}
+		}
+
+		const todoTagsMatch = path.match(/^\/api\/todos\/(\d+)\/tags$/);
+		if (todoTagsMatch) {
+			const todoId = parseInt(todoTagsMatch[1], 10);
+			if (method === "GET") {
+				return handleGetTodoTags(env, user.id, todoId);
+			}
+			if (method === "PUT") {
+				return handleSetTodoTags(request, env, user.id, todoId);
 			}
 		}
 
@@ -188,6 +199,42 @@ export default {
 			}
 			if (method === "DELETE") {
 				return handleDeleteStep(env, user.id, stepId);
+			}
+		}
+
+		if (path === "/api/tag-groups" && method === "GET") {
+			return handleGetTagGroups(env, user.id);
+		}
+		if (path === "/api/tag-groups" && method === "POST") {
+			return handleCreateTagGroup(request, env, user.id);
+		}
+
+		const tagGroupIdMatch = path.match(/^\/api\/tag-groups\/(\d+)$/);
+		if (tagGroupIdMatch) {
+			const id = parseInt(tagGroupIdMatch[1], 10);
+			if (method === "PUT") {
+				return handleUpdateTagGroup(request, env, user.id, id);
+			}
+			if (method === "DELETE") {
+				return handleDeleteTagGroup(env, user.id, id);
+			}
+		}
+
+		if (path === "/api/tags" && method === "GET") {
+			return handleGetTags(env, user.id);
+		}
+		if (path === "/api/tags" && method === "POST") {
+			return handleCreateTag(request, env, user.id);
+		}
+
+		const tagIdMatch = path.match(/^\/api\/tags\/(\d+)$/);
+		if (tagIdMatch) {
+			const id = parseInt(tagIdMatch[1], 10);
+			if (method === "PUT") {
+				return handleUpdateTag(request, env, user.id, id);
+			}
+			if (method === "DELETE") {
+				return handleDeleteTag(env, user.id, id);
 			}
 		}
 
@@ -455,10 +502,34 @@ function escapeHtml(text: string): string {
 	return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
-async function handleGetTodos(env: Env, userId: number) {
+async function handleGetTodos(env: Env, userId: number, searchParams: URLSearchParams) {
 	try {
-		const { results } = await env.DB.prepare("SELECT id, title, completed, is_public, created_at FROM todos WHERE owner_id = ? ORDER BY created_at DESC").bind(userId).all();
-		return jsonResponse(results);
+		let query = "SELECT id, title, completed, is_public, created_at FROM todos WHERE owner_id = ?";
+		const bindings: (string | number)[] = [userId];
+
+		const tagId = searchParams.get("tag_id");
+		const groupId = searchParams.get("group_id");
+
+		if (tagId) {
+			query += " AND id IN (SELECT todo_id FROM todo_tags WHERE tag_id = ?)";
+			bindings.push(parseInt(tagId, 10));
+		}
+		if (groupId) {
+			query += " AND id IN (SELECT tt.todo_id FROM todo_tags tt JOIN tags t ON tt.tag_id = t.id WHERE t.group_id = ?)";
+			bindings.push(parseInt(groupId, 10));
+		}
+
+		query += " ORDER BY created_at DESC";
+
+		const { results } = await env.DB.prepare(query).bind(...bindings).all();
+		const todos = results as Array<Record<string, unknown>>;
+
+		const todosWithTags = await Promise.all(todos.map(async (todo) => {
+			const { results: tags } = await env.DB.prepare("SELECT t.id, t.name, t.color, t.group_id FROM tags t JOIN todo_tags tt ON t.id = tt.tag_id WHERE tt.todo_id = ?").bind(todo.id).all();
+			return { ...todo, tags };
+		}));
+
+		return jsonResponse(todosWithTags);
 	} catch (err) {
 		return jsonError("Failed to fetch todos", 500);
 	}
@@ -527,7 +598,11 @@ async function handleGetPublicTodos(env: Env, username: string) {
 			return jsonError("User not found", 404);
 		}
 		const { results } = await env.DB.prepare("SELECT id, title, completed, created_at FROM todos WHERE owner_id = ? AND is_public = 1 ORDER BY created_at DESC").bind(user.id).all();
-		return jsonResponse({ username: user.username, todos: results });
+		const todosWithSteps = await Promise.all((results as Array<Record<string, unknown>>).map(async (todo) => {
+			const { results: steps } = await env.DB.prepare("SELECT id, title, completed, sort_order FROM todo_steps WHERE todo_id = ? ORDER BY sort_order ASC, created_at ASC").bind(todo.id).all();
+			return { ...todo, steps };
+		}));
+		return jsonResponse({ username: user.username, todos: todosWithSteps });
 	} catch (err) {
 		return jsonError("Failed to fetch public todos", 500);
 	}
@@ -776,6 +851,167 @@ async function handleVerifyEmailCode(request: Request, env: Env, userId: number)
 		return jsonResponse({ message: "Email verified successfully" });
 	} catch (err) {
 		return jsonError("Failed to verify email", 500);
+	}
+}
+
+async function handleGetTagGroups(env: Env, userId: number) {
+	try {
+		const { results } = await env.DB.prepare("SELECT id, name, sort_order, created_at FROM tag_groups WHERE owner_id = ? ORDER BY sort_order ASC, created_at ASC").bind(userId).all();
+		return jsonResponse(results);
+	} catch (err) {
+		return jsonError("Failed to fetch tag groups", 500);
+	}
+}
+
+async function handleCreateTagGroup(request: Request, env: Env, userId: number) {
+	try {
+		const body = await request.json<{ name: string; sort_order?: number }>();
+		if (!body.name?.trim()) {
+			return jsonError("Name is required", 400);
+		}
+		const maxOrder = await env.DB.prepare("SELECT COALESCE(MAX(sort_order), -1) as max_order FROM tag_groups WHERE owner_id = ?").bind(userId).first() as Record<string, number>;
+		const sortOrder = body.sort_order ?? (maxOrder?.max_order ?? -1) + 1;
+		const result = await env.DB.prepare("INSERT INTO tag_groups (name, owner_id, sort_order) VALUES (?, ?, ?) RETURNING id, name, sort_order, created_at").bind(body.name.trim(), userId, sortOrder).first();
+		return jsonResponse(result, 201);
+	} catch (err) {
+		return jsonError("Failed to create tag group", 500);
+	}
+}
+
+async function handleUpdateTagGroup(request: Request, env: Env, userId: number, id: number) {
+	try {
+		const group = await env.DB.prepare("SELECT * FROM tag_groups WHERE id = ? AND owner_id = ?").bind(id, userId).first();
+		if (!group) {
+			return jsonError("Tag group not found", 404);
+		}
+		const body = await request.json<{ name?: string; sort_order?: number }>();
+		const existing = group as Record<string, unknown>;
+		const newName = body.name !== undefined ? body.name.trim() : existing.name;
+		const newSortOrder = body.sort_order !== undefined ? body.sort_order : existing.sort_order;
+		const updated = await env.DB.prepare("UPDATE tag_groups SET name = ?, sort_order = ? WHERE id = ? AND owner_id = ? RETURNING id, name, sort_order, created_at").bind(newName, newSortOrder, id, userId).first();
+		return jsonResponse(updated);
+	} catch (err) {
+		return jsonError("Failed to update tag group", 500);
+	}
+}
+
+async function handleDeleteTagGroup(env: Env, userId: number, id: number) {
+	try {
+		const group = await env.DB.prepare("SELECT * FROM tag_groups WHERE id = ? AND owner_id = ?").bind(id, userId).first();
+		if (!group) {
+			return jsonError("Tag group not found", 404);
+		}
+		await env.DB.prepare("DELETE FROM tag_groups WHERE id = ? AND owner_id = ?").bind(id, userId).run();
+		return new Response(null, { status: 204 });
+	} catch (err) {
+		return jsonError("Failed to delete tag group", 500);
+	}
+}
+
+async function handleGetTags(env: Env, userId: number) {
+	try {
+		const { results } = await env.DB.prepare("SELECT id, name, group_id, color, created_at FROM tags WHERE owner_id = ? ORDER BY created_at ASC").bind(userId).all();
+		return jsonResponse(results);
+	} catch (err) {
+		return jsonError("Failed to fetch tags", 500);
+	}
+}
+
+async function handleCreateTag(request: Request, env: Env, userId: number) {
+	try {
+		const body = await request.json<{ name: string; group_id?: number | null; color?: string }>();
+		if (!body.name?.trim()) {
+			return jsonError("Name is required", 400);
+		}
+		const color = body.color || "#0E838F";
+		const groupId = body.group_id ?? null;
+		if (groupId) {
+			const group = await env.DB.prepare("SELECT id FROM tag_groups WHERE id = ? AND owner_id = ?").bind(groupId, userId).first();
+			if (!group) {
+				return jsonError("Tag group not found", 404);
+			}
+		}
+		const result = await env.DB.prepare("INSERT INTO tags (name, group_id, owner_id, color) VALUES (?, ?, ?, ?) RETURNING id, name, group_id, color, created_at").bind(body.name.trim(), groupId, userId, color).first();
+		return jsonResponse(result, 201);
+	} catch (err) {
+		return jsonError("Failed to create tag", 500);
+	}
+}
+
+async function handleUpdateTag(request: Request, env: Env, userId: number, id: number) {
+	try {
+		const tag = await env.DB.prepare("SELECT * FROM tags WHERE id = ? AND owner_id = ?").bind(id, userId).first();
+		if (!tag) {
+			return jsonError("Tag not found", 404);
+		}
+		const body = await request.json<{ name?: string; group_id?: number | null; color?: string }>();
+		const existing = tag as Record<string, unknown>;
+		const newName = body.name !== undefined ? body.name.trim() : existing.name;
+		const newGroupId = body.group_id !== undefined ? body.group_id : existing.group_id;
+		const newColor = body.color !== undefined ? body.color : existing.color;
+		if (newGroupId) {
+			const group = await env.DB.prepare("SELECT id FROM tag_groups WHERE id = ? AND owner_id = ?").bind(newGroupId, userId).first();
+			if (!group) {
+				return jsonError("Tag group not found", 404);
+			}
+		}
+		const updated = await env.DB.prepare("UPDATE tags SET name = ?, group_id = ?, color = ? WHERE id = ? AND owner_id = ? RETURNING id, name, group_id, color, created_at").bind(newName, newGroupId, newColor, id, userId).first();
+		return jsonResponse(updated);
+	} catch (err) {
+		return jsonError("Failed to update tag", 500);
+	}
+}
+
+async function handleDeleteTag(env: Env, userId: number, id: number) {
+	try {
+		const tag = await env.DB.prepare("SELECT * FROM tags WHERE id = ? AND owner_id = ?").bind(id, userId).first();
+		if (!tag) {
+			return jsonError("Tag not found", 404);
+		}
+		await env.DB.prepare("DELETE FROM tags WHERE id = ? AND owner_id = ?").bind(id, userId).run();
+		return new Response(null, { status: 204 });
+	} catch (err) {
+		return jsonError("Failed to delete tag", 500);
+	}
+}
+
+async function handleGetTodoTags(env: Env, userId: number, todoId: number) {
+	try {
+		const todo = await env.DB.prepare("SELECT id FROM todos WHERE id = ? AND owner_id = ?").bind(todoId, userId).first();
+		if (!todo) {
+			return jsonError("Todo not found", 404);
+		}
+		const { results } = await env.DB.prepare("SELECT t.id, t.name, t.group_id, t.color FROM tags t JOIN todo_tags tt ON t.id = tt.tag_id WHERE tt.todo_id = ?").bind(todoId).all();
+		return jsonResponse(results);
+	} catch (err) {
+		return jsonError("Failed to fetch todo tags", 500);
+	}
+}
+
+async function handleSetTodoTags(request: Request, env: Env, userId: number, todoId: number) {
+	try {
+		const todo = await env.DB.prepare("SELECT id FROM todos WHERE id = ? AND owner_id = ?").bind(todoId, userId).first();
+		if (!todo) {
+			return jsonError("Todo not found", 404);
+		}
+		const body = await request.json<{ tag_ids: number[] }>();
+		if (!Array.isArray(body.tag_ids)) {
+			return jsonError("tag_ids must be an array", 400);
+		}
+		for (const tagId of body.tag_ids) {
+			const tag = await env.DB.prepare("SELECT id FROM tags WHERE id = ? AND owner_id = ?").bind(tagId, userId).first();
+			if (!tag) {
+				return jsonError(`Tag ${tagId} not found`, 404);
+			}
+		}
+		await env.DB.prepare("DELETE FROM todo_tags WHERE todo_id = ?").bind(todoId).run();
+		for (const tagId of body.tag_ids) {
+			await env.DB.prepare("INSERT INTO todo_tags (todo_id, tag_id) VALUES (?, ?)").bind(todoId, tagId).run();
+		}
+		const { results } = await env.DB.prepare("SELECT t.id, t.name, t.group_id, t.color FROM tags t JOIN todo_tags tt ON t.id = tt.tag_id WHERE tt.todo_id = ?").bind(todoId).all();
+		return jsonResponse(results);
+	} catch (err) {
+		return jsonError("Failed to set todo tags", 500);
 	}
 }
 

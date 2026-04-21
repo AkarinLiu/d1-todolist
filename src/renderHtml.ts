@@ -8,7 +8,9 @@ export function renderHtml(username: string, isAdmin: boolean) {
 	<style>
 		* { margin: 0; padding: 0; box-sizing: border-box; }
 		body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f5f5; min-height: 100vh; padding: 2rem; }
-		.container { max-width: 600px; margin: 0 auto; }
+		.container { max-width: 900px; margin: 0 auto; display: flex; gap: 1.5rem; }
+		.sidebar { width: 220px; flex-shrink: 0; }
+		.main { flex: 1; min-width: 0; }
 		.header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; }
 		h1 { color: #333; font-size: 2rem; }
 		.user-info { display: flex; align-items: center; gap: 1rem; }
@@ -25,10 +27,11 @@ export function renderHtml(username: string, isAdmin: boolean) {
 		.input-group button { padding: 0.75rem 1.5rem; background: #0E838F; color: white; border: none; border-radius: 8px; font-size: 1rem; cursor: pointer; transition: background 0.2s; }
 		.input-group button:hover { background: #0b6b6b; }
 		.todo-list { list-style: none; }
-		.todo-item { display: flex; align-items: center; gap: 0.75rem; padding: 1rem; background: white; border-radius: 8px; margin-bottom: 0.75rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); transition: all 0.2s; }
+		.todo-item { background: white; border-radius: 8px; margin-bottom: 0.75rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); transition: all 0.2s; }
 		.todo-item:hover { box-shadow: 0 2px 6px rgba(0,0,0,0.15); }
+		.todo-row { display: flex; align-items: center; gap: 0.75rem; padding: 1rem; }
 		.todo-item.completed .todo-title { text-decoration: line-through; color: #999; }
-		.todo-item input[type="checkbox"] { width: 20px; height: 20px; cursor: pointer; accent-color: #0E838F; }
+		.todo-row input[type="checkbox"] { width: 20px; height: 20px; cursor: pointer; accent-color: #0E838F; }
 		.todo-title { flex: 1; font-size: 1rem; color: #333; }
 		.todo-actions { display: flex; gap: 0.5rem; align-items: center; }
 		.public-toggle { padding: 0.3rem 0.6rem; background: #e8e8e8; color: #666; border: none; border-radius: 4px; cursor: pointer; font-size: 0.75rem; transition: all 0.2s; }
@@ -37,7 +40,13 @@ export function renderHtml(username: string, isAdmin: boolean) {
 		.delete-btn:hover { background: #d9363e; }
 		.steps-btn { padding: 0.3rem 0.6rem; background: #9c27b0; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 0.75rem; transition: all 0.2s; }
 		.steps-btn:hover { background: #7b1fa2; }
-		.steps-container { margin-top: 0.5rem; padding: 0.75rem; background: #f9f9f9; border-radius: 6px; border-left: 3px solid #9c27b0; }
+		.tag-btn { padding: 0.3rem 0.6rem; background: #4caf50; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 0.75rem; transition: all 0.2s; }
+		.tag-btn:hover { background: #388e3c; }
+		.todo-tags { display: flex; flex-wrap: wrap; gap: 0.3rem; padding: 0 1rem 0.75rem; }
+		.tag-badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 10px; font-size: 0.7rem; color: white; cursor: pointer; }
+		.tag-badge:hover { opacity: 0.8; }
+		.steps-container { padding: 0 1rem 1rem 1rem; }
+		.steps-inner { padding: 0.75rem; background: #f9f9f9; border-radius: 6px; border-left: 3px solid #9c27b0; }
 		.steps-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
 		.steps-header h4 { color: #9c27b0; font-size: 0.875rem; }
 		.step-add { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; }
@@ -53,26 +62,71 @@ export function renderHtml(username: string, isAdmin: boolean) {
 		.share-link { margin-top: 1.5rem; padding: 1rem; background: #e8f8f8; border-radius: 8px; text-align: center; }
 		.share-link code { background: white; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.875rem; }
 		.empty-state { text-align: center; color: #999; padding: 3rem 0; }
+		.filter-section { background: white; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+		.filter-section h3 { font-size: 0.875rem; color: #666; margin-bottom: 0.75rem; padding-bottom: 0.5rem; border-bottom: 1px solid #eee; }
+		.filter-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0; cursor: pointer; font-size: 0.875rem; }
+		.filter-item:hover { color: #0E838F; }
+		.filter-item.active { color: #0E838F; font-weight: 600; }
+		.filter-item .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+		.filter-group-header { display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0; cursor: pointer; font-size: 0.875rem; font-weight: 600; color: #333; }
+		.filter-group-header:hover { color: #0E838F; }
+		.filter-group-items { padding-left: 1rem; }
+		.tag-modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+		.tag-modal { background: white; border-radius: 12px; padding: 1.5rem; width: 90%; max-width: 400px; max-height: 80vh; overflow-y: auto; }
+		.tag-modal h3 { margin-bottom: 1rem; color: #333; }
+		.tag-modal .tag-option { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem; border-radius: 6px; cursor: pointer; }
+		.tag-modal .tag-option:hover { background: #f5f5f5; }
+		.tag-modal .tag-option.selected { background: #e8f8f8; }
+		.tag-modal .tag-option input[type="checkbox"] { accent-color: #0E838F; }
+		.tag-modal .new-tag-input { display: flex; gap: 0.5rem; margin-top: 1rem; }
+		.tag-modal .new-tag-input input { flex: 1; padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px; }
+		.tag-modal .new-tag-input button { padding: 0.5rem 1rem; background: #4caf50; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 0.875rem; }
+		.tag-modal .close-btn { margin-top: 1rem; width: 100%; padding: 0.75rem; background: #666; color: white; border: none; border-radius: 6px; cursor: pointer; }
+		.tag-modal .group-label { font-size: 0.75rem; color: #999; margin-top: 0.75rem; margin-bottom: 0.25rem; font-weight: 600; }
 	</style>
 </head>
 <body>
 	<div class="container">
-		<div class="header">
-			<h1>待办事项</h1>
-			<div class="user-info">
-				<span class="username">${escapeHtml(username)}</span>
-				<a class="profile-btn" href="/profile">个人资料</a>
-				${isAdmin ? '<a class="admin-btn" href="/admin">管理用户</a>' : ''}
-				<button class="logout-btn" onclick="logout()">退出登录</button>
+		<div class="sidebar">
+			<div class="filter-section">
+				<h3>筛选</h3>
+				<div class="filter-item active" data-filter="all" onclick="setFilter('all')">全部</div>
+				<div id="tagFilters"></div>
+			</div>
+			<div class="filter-section">
+				<h3>标签分组</h3>
+				<div id="groupFilters"></div>
 			</div>
 		</div>
-		<form class="input-group" id="addForm">
-			<input type="text" id="todoInput" placeholder="输入新的待办事项..." required />
-			<button type="submit">添加</button>
-		</form>
-		<ul class="todo-list" id="todoList"></ul>
-		<div class="share-link">
-			<p>公开分享链接：<code id="shareUrl"></code></p>
+		<div class="main">
+			<div class="header">
+				<h1>待办事项</h1>
+				<div class="user-info">
+					<span class="username">${escapeHtml(username)}</span>
+					<a class="profile-btn" href="/profile">个人资料</a>
+					${isAdmin ? '<a class="admin-btn" href="/admin">管理用户</a>' : ''}
+					<button class="logout-btn" onclick="logout()">退出登录</button>
+				</div>
+			</div>
+			<form class="input-group" id="addForm">
+				<input type="text" id="todoInput" placeholder="输入新的待办事项..." required />
+				<button type="submit">添加</button>
+			</form>
+			<ul class="todo-list" id="todoList"></ul>
+			<div class="share-link">
+				<p>公开分享链接：<code id="shareUrl"></code></p>
+			</div>
+		</div>
+	</div>
+	<div class="tag-modal-overlay" id="tagModal" style="display: none;">
+		<div class="tag-modal">
+			<h3>管理标签</h3>
+			<div id="tagOptions"></div>
+			<div class="new-tag-input">
+				<input type="text" id="newTagInput" placeholder="输入新标签名称..." />
+				<button onclick="createNewTag()">创建</button>
+			</div>
+			<button class="close-btn" onclick="closeTagModal()">关闭</button>
 		</div>
 	</div>
 	<script>
@@ -81,43 +135,222 @@ export function renderHtml(username: string, isAdmin: boolean) {
 		const todoInput = document.getElementById("todoInput");
 		const addForm = document.getElementById("addForm");
 		const shareUrl = document.getElementById("shareUrl");
+		const tagFilters = document.getElementById("tagFilters");
+		const groupFilters = document.getElementById("groupFilters");
+		const tagModal = document.getElementById("tagModal");
+		const tagOptions = document.getElementById("tagOptions");
 
 		shareUrl.textContent = window.location.origin + "/public/" + username;
 
-		async function fetchTodos() {
-			const res = await fetch("/api/todos");
-			if (res.status === 401) { window.location.href = "/"; return; }
-			const todos = await res.json();
-			renderTodos(todos);
+		let allTags = [];
+		let allGroups = [];
+		let allTodos = [];
+		let currentFilter = { type: "all", id: null };
+		let currentTagTodoId = null;
+
+		async function fetchData() {
+			const [todosRes, tagsRes, groupsRes] = await Promise.all([
+				fetch("/api/todos"),
+				fetch("/api/tags"),
+				fetch("/api/tag-groups")
+			]);
+			if (todosRes.status === 401) { window.location.href = "/"; return; }
+			allTodos = await todosRes.json();
+			allTags = await tagsRes.json();
+			allGroups = await groupsRes.json();
+			renderFilters();
+			renderTodos();
 		}
 
-		function renderTodos(todos) {
-			if (todos.length === 0) {
+		function renderFilters() {
+			tagFilters.innerHTML = allTags.map(tag => \`
+				<div class="filter-item" data-filter="tag" data-id="\${tag.id}" onclick="setFilter('tag', \${tag.id})">
+					<span class="dot" style="background: \${tag.color}"></span>
+					<span>\${escapeHtml(tag.name)}</span>
+				</div>
+			\`).join("");
+
+			groupFilters.innerHTML = allGroups.map(group => {
+				const groupTags = allTags.filter(t => t.group_id === group.id);
+				const tagsHtml = groupTags.map(tag => \`
+					<div class="filter-item" data-filter="tag" data-id="\${tag.id}" onclick="setFilter('tag', \${tag.id})">
+						<span class="dot" style="background: \${tag.color}"></span>
+						<span>\${escapeHtml(tag.name)}</span>
+					</div>
+				\`).join("");
+				return \`
+					<div>
+						<div class="filter-group-header" onclick="setFilter('group', \${group.id})">
+							<span>\${escapeHtml(group.name)}</span>
+						</div>
+						<div class="filter-group-items">\${tagsHtml}</div>
+					</div>
+				\`;
+			}).join("");
+		}
+
+		window.setFilter = function(type, id) {
+			currentFilter = { type, id };
+			document.querySelectorAll(".filter-item").forEach(el => el.classList.remove("active"));
+			if (type === "all") {
+				document.querySelector('[data-filter="all"]').classList.add("active");
+			} else {
+				const el = document.querySelector('[data-filter="tag"][data-id="' + id + '"]');
+				if (el) el.classList.add("active");
+			}
+			renderTodos();
+		};
+
+		function getFilteredTodos() {
+			if (currentFilter.type === "all") return allTodos;
+			if (currentFilter.type === "tag") {
+				return allTodos.filter(todo => todo.tags && todo.tags.some(t => t.id === currentFilter.id));
+			}
+			if (currentFilter.type === "group") {
+				return allTodos.filter(todo => todo.tags && todo.tags.some(t => {
+					const tag = allTags.find(tag => tag.id === t.id);
+					return tag && tag.group_id === currentFilter.id;
+				}));
+			}
+			return allTodos;
+		}
+
+		function renderTodos() {
+			const filtered = getFilteredTodos();
+			if (filtered.length === 0) {
 				todoList.innerHTML = '<li class="empty-state">暂无待办事项，添加一个吧！</li>';
 				return;
 			}
-			todoList.innerHTML = todos.map(todo => \`
-				<li class="todo-item \${todo.completed ? 'completed' : ''}" data-id="\${todo.id}">
-					<input type="checkbox" \${todo.completed ? 'checked' : ''} onchange="toggleTodo(\${todo.id}, this.checked)" />
-					<span class="todo-title">\${escapeHtml(todo.title)}</span>
-					<div class="todo-actions">
-						<button class="steps-btn" onclick="toggleSteps(\${todo.id})">步骤</button>
-						<button class="public-toggle \${todo.is_public ? 'active' : ''}" onclick="togglePublic(\${todo.id}, \${todo.is_public})">\${todo.is_public ? '公开' : '私有'}</button>
-						<button class="delete-btn" onclick="deleteTodo(\${todo.id})">删除</button>
-					</div>
-					<div class="steps-container" id="steps-\${todo.id}" style="display: none;">
-						<div class="steps-header">
-							<h4>步骤</h4>
+			todoList.innerHTML = filtered.map(todo => {
+				const tagsHtml = (todo.tags || []).map(tag => \`
+					<span class="tag-badge" style="background: \${tag.color}" title="\${escapeHtml(tag.name)}">\${escapeHtml(tag.name)}</span>
+				\`).join("");
+				return \`
+					<li class="todo-item \${todo.completed ? 'completed' : ''}" data-id="\${todo.id}">
+						<div class="todo-row">
+							<input type="checkbox" \${todo.completed ? 'checked' : ''} onchange="toggleTodo(\${todo.id}, this.checked)" />
+							<span class="todo-title">\${escapeHtml(todo.title)}</span>
+							<div class="todo-actions">
+								<button class="tag-btn" onclick="openTagModal(\${todo.id})">标签</button>
+								<button class="steps-btn" onclick="toggleSteps(\${todo.id})">步骤</button>
+								<button class="public-toggle \${todo.is_public ? 'active' : ''}" onclick="togglePublic(\${todo.id}, \${todo.is_public})">\${todo.is_public ? '公开' : '私有'}</button>
+								<button class="delete-btn" onclick="deleteTodo(\${todo.id})">删除</button>
+							</div>
 						</div>
-						<div class="step-add">
-							<input type="text" id="stepInput-\${todo.id}" placeholder="添加步骤..." />
-							<button onclick="addStep(\${todo.id})">添加</button>
+						<div class="todo-tags">\${tagsHtml}</div>
+						<div class="steps-container" id="steps-\${todo.id}" style="display: none;">
+							<div class="steps-inner">
+								<div class="steps-header">
+									<h4>步骤</h4>
+								</div>
+								<div class="step-add">
+									<input type="text" id="stepInput-\${todo.id}" placeholder="添加步骤..." />
+									<button onclick="addStep(\${todo.id})">添加</button>
+								</div>
+								<ul class="step-list" id="stepList-\${todo.id}"></ul>
+							</div>
 						</div>
-						<ul class="step-list" id="stepList-\${todo.id}"></ul>
-					</div>
-				</li>
-			\`).join("");
+					</li>
+				\`;
+			}).join("");
 		}
+
+		window.openTagModal = async function(todoId) {
+			currentTagTodoId = todoId;
+			const todo = allTodos.find(t => t.id === todoId);
+			const selectedTagIds = (todo && todo.tags) ? todo.tags.map(t => t.id) : [];
+
+			let html = "";
+			const groupedTags = {};
+			allTags.forEach(tag => {
+				const groupId = tag.group_id || "ungrouped";
+				if (!groupedTags[groupId]) groupedTags[groupId] = [];
+				groupedTags[groupId].push(tag);
+			});
+
+			if (groupedTags["ungrouped"] && groupedTags["ungrouped"].length > 0) {
+				html += '<div class="group-label">无分组</div>';
+				groupedTags["ungrouped"].forEach(tag => {
+					const checked = selectedTagIds.includes(tag.id) ? "checked" : "";
+					html += \`<label class="tag-option \${checked ? 'selected' : ''}">
+						<input type="checkbox" \${checked} onchange="toggleTagSelection(this, \${tag.id})" />
+						<span class="dot" style="background: \${tag.color}"></span>
+						<span>\${escapeHtml(tag.name)}</span>
+					</label>\`;
+				});
+			}
+
+			allGroups.forEach(group => {
+				const tags = groupedTags[group.id] || [];
+				if (tags.length > 0) {
+					html += \`<div class="group-label">\${escapeHtml(group.name)}</div>\`;
+					tags.forEach(tag => {
+						const checked = selectedTagIds.includes(tag.id) ? "checked" : "";
+						html += \`<label class="tag-option \${checked ? 'selected' : ''}">
+							<input type="checkbox" \${checked} onchange="toggleTagSelection(this, \${tag.id})" />
+							<span class="dot" style="background: \${tag.color}"></span>
+							<span>\${escapeHtml(tag.name)}</span>
+						</label>\`;
+					});
+				}
+			});
+
+			if (allTags.length === 0) {
+				html = '<p style="color: #999; font-size: 0.875rem;">暂无标签，请在下方创建</p>';
+			}
+
+			tagOptions.innerHTML = html;
+			tagModal.style.display = "flex";
+		};
+
+		window.toggleTagSelection = function(checkbox, tagId) {
+			checkbox.closest(".tag-option").classList.toggle("selected", checkbox.checked);
+			applyTags();
+		};
+
+		async function applyTags() {
+			if (!currentTagTodoId) return;
+			const checkboxes = tagOptions.querySelectorAll("input[type='checkbox']");
+			const tagIds = Array.from(checkboxes).filter(cb => cb.checked).map(cb => parseInt(cb.getAttribute("onchange").match(/\\d+/)[0]));
+			await fetch("/api/todos/" + currentTagTodoId + "/tags", {
+				method: "PUT",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ tag_ids: tagIds })
+			});
+			await fetchData();
+		}
+
+		window.createNewTag = async function() {
+			const input = document.getElementById("newTagInput");
+			const name = input.value.trim();
+			if (!name) return;
+			const colors = ["#0E838F", "#2196f3", "#9c27b0", "#ff9800", "#4caf50", "#f44336", "#795548", "#607d8b"];
+			const color = colors[Math.floor(Math.random() * colors.length)];
+			const res = await fetch("/api/tags", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ name, color })
+			});
+			if (res.ok) {
+				input.value = "";
+				await fetchData();
+				openTagModal(currentTagTodoId);
+				const newTag = allTags.find(t => t.name === name);
+				if (newTag) {
+					const checkbox = tagOptions.querySelector("input[onchange*='" + newTag.id + "']");
+					if (checkbox) {
+						checkbox.checked = true;
+						checkbox.closest(".tag-option").classList.add("selected");
+						await applyTags();
+					}
+				}
+			}
+		};
+
+		window.closeTagModal = function() {
+			tagModal.style.display = "none";
+			currentTagTodoId = null;
+		};
 
 		function escapeHtml(text) {
 			const div = document.createElement("div");
@@ -131,22 +364,22 @@ export function renderHtml(username: string, isAdmin: boolean) {
 			if (!title) return;
 			await fetch("/api/todos", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title }) });
 			todoInput.value = "";
-			fetchTodos();
+			fetchData();
 		});
 
 		window.toggleTodo = async (id, completed) => {
 			await fetch(\`/api/todos/\${id}\`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ completed }) });
-			fetchTodos();
+			fetchData();
 		};
 
 		window.deleteTodo = async (id) => {
 			await fetch(\`/api/todos/\${id}\`, { method: "DELETE" });
-			fetchTodos();
+			fetchData();
 		};
 
 		window.togglePublic = async (id, current) => {
 			await fetch("/api/todos/toggle-public", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, isPublic: !current }) });
-			fetchTodos();
+			fetchData();
 		};
 
 		window.toggleSteps = async (todoId) => {
@@ -205,7 +438,7 @@ export function renderHtml(username: string, isAdmin: boolean) {
 			window.location.href = "/";
 		}
 
-		fetchTodos();
+		fetchData();
 	</script>
 </body>
 </html>`;
@@ -540,10 +773,19 @@ export function renderPublicPage(username: string) {
 		h1 { text-align: center; color: #333; margin-bottom: 0.5rem; }
 		.subtitle { text-align: center; color: #666; margin-bottom: 2rem; }
 		.todo-list { list-style: none; }
-		.todo-item { display: flex; align-items: center; gap: 1rem; padding: 1rem; background: white; border-radius: 8px; margin-bottom: 0.75rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+		.todo-item { background: white; border-radius: 8px; margin-bottom: 0.75rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+		.todo-row { display: flex; align-items: center; gap: 1rem; padding: 1rem; }
 		.todo-item.completed .todo-title { text-decoration: line-through; color: #999; }
-		.todo-item input[type="checkbox"] { width: 20px; height: 20px; accent-color: #0E838F; pointer-events: none; }
+		.todo-row input[type="checkbox"] { width: 20px; height: 20px; accent-color: #0E838F; pointer-events: none; }
 		.todo-title { flex: 1; font-size: 1rem; color: #333; }
+		.steps-container { padding: 0 1rem 1rem 1rem; }
+		.steps-inner { padding: 0.75rem; background: #f9f9f9; border-radius: 6px; border-left: 3px solid #9c27b0; }
+		.steps-header h4 { color: #9c27b0; font-size: 0.875rem; margin-bottom: 0.5rem; }
+		.step-list { list-style: none; }
+		.step-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0; }
+		.step-item input[type="checkbox"] { width: 16px; height: 16px; accent-color: #9c27b0; pointer-events: none; }
+		.step-item.completed .step-title { text-decoration: line-through; color: #999; }
+		.step-title { font-size: 0.875rem; }
 		.empty-state { text-align: center; color: #999; padding: 3rem 0; }
 	</style>
 </head>
@@ -568,12 +810,32 @@ export function renderPublicPage(username: string) {
 				todoList.innerHTML = '<li class="empty-state">暂无公开的待办事项</li>';
 				return;
 			}
-			todoList.innerHTML = todos.map(todo => \`
-				<li class="todo-item \${todo.completed ? 'completed' : ''}">
-					<input type="checkbox" \${todo.completed ? 'checked' : ''} disabled />
-					<span class="todo-title">\${escapeHtml(todo.title)}</span>
-				</li>
-			\`).join("");
+			todoList.innerHTML = todos.map(todo => {
+				const stepsHtml = todo.steps && todo.steps.length > 0 ? \`
+					<div class="steps-container">
+						<div class="steps-inner">
+							<div class="steps-header"><h4>步骤</h4></div>
+							<ul class="step-list">
+								\${todo.steps.map(step => \`
+									<li class="step-item \${step.completed ? 'completed' : ''}">
+										<input type="checkbox" \${step.completed ? 'checked' : ''} disabled />
+										<span class="step-title">\${escapeHtml(step.title)}</span>
+									</li>
+								\`).join("")}
+							</ul>
+						</div>
+					</div>
+				\` : '';
+				return \`
+					<li class="todo-item \${todo.completed ? 'completed' : ''}">
+						<div class="todo-row">
+							<input type="checkbox" \${todo.completed ? 'checked' : ''} disabled />
+							<span class="todo-title">\${escapeHtml(todo.title)}</span>
+						</div>
+						\${stepsHtml}
+					</li>
+				\`;
+			}).join("");
 		}
 
 		function escapeHtml(text) {
