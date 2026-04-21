@@ -169,6 +169,28 @@ export default {
 			}
 		}
 
+		const todoStepsMatch = path.match(/^\/api\/todos\/(\d+)\/steps$/);
+		if (todoStepsMatch) {
+			const todoId = parseInt(todoStepsMatch[1], 10);
+			if (method === "GET") {
+				return handleGetSteps(env, user.id, todoId);
+			}
+			if (method === "POST") {
+				return handleCreateStep(request, env, user.id, todoId);
+			}
+		}
+
+		const stepIdMatch = path.match(/^\/api\/todos\/\d+\/steps\/(\d+)$/);
+		if (stepIdMatch) {
+			const stepId = parseInt(stepIdMatch[1], 10);
+			if (method === "PUT") {
+				return handleUpdateStep(request, env, user.id, stepId);
+			}
+			if (method === "DELETE") {
+				return handleDeleteStep(env, user.id, stepId);
+			}
+		}
+
 		if (path === "/api/public/todos" && method === "GET") {
 			const username = url.searchParams.get("username");
 			if (!username) return jsonError("Username required", 400);
@@ -508,6 +530,68 @@ async function handleGetPublicTodos(env: Env, username: string) {
 		return jsonResponse({ username: user.username, todos: results });
 	} catch (err) {
 		return jsonError("Failed to fetch public todos", 500);
+	}
+}
+
+async function handleGetSteps(env: Env, userId: number, todoId: number) {
+	try {
+		const todo = await env.DB.prepare("SELECT id FROM todos WHERE id = ? AND owner_id = ?").bind(todoId, userId).first();
+		if (!todo) {
+			return jsonError("Todo not found", 404);
+		}
+		const { results } = await env.DB.prepare("SELECT id, todo_id, title, completed, sort_order, created_at FROM todo_steps WHERE todo_id = ? ORDER BY sort_order ASC, created_at ASC").bind(todoId).all();
+		return jsonResponse(results);
+	} catch (err) {
+		return jsonError("Failed to fetch steps", 500);
+	}
+}
+
+async function handleCreateStep(request: Request, env: Env, userId: number, todoId: number) {
+	try {
+		const todo = await env.DB.prepare("SELECT id FROM todos WHERE id = ? AND owner_id = ?").bind(todoId, userId).first();
+		if (!todo) {
+			return jsonError("Todo not found", 404);
+		}
+		const body = await request.json<{ title: string }>();
+		if (!body.title?.trim()) {
+			return jsonError("Title is required", 400);
+		}
+		const maxOrder = await env.DB.prepare("SELECT COALESCE(MAX(sort_order), -1) as max_order FROM todo_steps WHERE todo_id = ?").bind(todoId).first() as Record<string, number>;
+		const sortOrder = (maxOrder?.max_order ?? -1) + 1;
+		const result = await env.DB.prepare("INSERT INTO todo_steps (todo_id, title, sort_order) VALUES (?, ?, ?) RETURNING id, todo_id, title, completed, sort_order, created_at").bind(todoId, body.title.trim(), sortOrder).first();
+		return jsonResponse(result, 201);
+	} catch (err) {
+		return jsonError("Failed to create step", 500);
+	}
+}
+
+async function handleUpdateStep(request: Request, env: Env, userId: number, stepId: number) {
+	try {
+		const step = await env.DB.prepare("SELECT ts.* FROM todo_steps ts JOIN todos t ON ts.todo_id = t.id WHERE ts.id = ? AND t.owner_id = ?").bind(stepId, userId).first() as Record<string, unknown> | null;
+		if (!step) {
+			return jsonError("Step not found", 404);
+		}
+		const body = await request.json<{ title?: string; completed?: boolean; sort_order?: number }>();
+		const newTitle = body.title !== undefined ? body.title.trim() : step.title;
+		const newCompleted = body.completed !== undefined ? (body.completed ? 1 : 0) : step.completed;
+		const newSortOrder = body.sort_order !== undefined ? body.sort_order : step.sort_order;
+		const updated = await env.DB.prepare("UPDATE todo_steps SET title = ?, completed = ?, sort_order = ? WHERE id = ? RETURNING id, todo_id, title, completed, sort_order, created_at").bind(newTitle, newCompleted, newSortOrder, stepId).first();
+		return jsonResponse(updated);
+	} catch (err) {
+		return jsonError("Failed to update step", 500);
+	}
+}
+
+async function handleDeleteStep(env: Env, userId: number, stepId: number) {
+	try {
+		const step = await env.DB.prepare("SELECT ts.* FROM todo_steps ts JOIN todos t ON ts.todo_id = t.id WHERE ts.id = ? AND t.owner_id = ?").bind(stepId, userId).first();
+		if (!step) {
+			return jsonError("Step not found", 404);
+		}
+		await env.DB.prepare("DELETE FROM todo_steps WHERE id = ?").bind(stepId).run();
+		return new Response(null, { status: 204 });
+	} catch (err) {
+		return jsonError("Failed to delete step", 500);
 	}
 }
 

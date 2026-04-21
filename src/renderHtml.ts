@@ -35,6 +35,21 @@ export function renderHtml(username: string, isAdmin: boolean) {
 		.public-toggle.active { background: #0E838F; color: white; }
 		.delete-btn { padding: 0.4rem 0.8rem; background: #ff4d4f; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 0.875rem; transition: background 0.2s; }
 		.delete-btn:hover { background: #d9363e; }
+		.steps-btn { padding: 0.3rem 0.6rem; background: #9c27b0; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 0.75rem; transition: all 0.2s; }
+		.steps-btn:hover { background: #7b1fa2; }
+		.steps-container { margin-top: 0.5rem; padding: 0.75rem; background: #f9f9f9; border-radius: 6px; border-left: 3px solid #9c27b0; }
+		.steps-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
+		.steps-header h4 { color: #9c27b0; font-size: 0.875rem; }
+		.step-add { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; }
+		.step-add input { flex: 1; padding: 0.4rem 0.6rem; border: 1px solid #ddd; border-radius: 4px; font-size: 0.875rem; }
+		.step-add button { padding: 0.4rem 0.8rem; background: #9c27b0; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 0.75rem; }
+		.step-list { list-style: none; }
+		.step-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0; }
+		.step-item input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; accent-color: #9c27b0; }
+		.step-item.completed .step-title { text-decoration: line-through; color: #999; }
+		.step-title { flex: 1; font-size: 0.875rem; }
+		.step-delete { padding: 0.2rem 0.5rem; background: #ff4d4f; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 0.7rem; }
+		.step-delete:hover { background: #d9363e; }
 		.share-link { margin-top: 1.5rem; padding: 1rem; background: #e8f8f8; border-radius: 8px; text-align: center; }
 		.share-link code { background: white; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.875rem; }
 		.empty-state { text-align: center; color: #999; padding: 3rem 0; }
@@ -86,8 +101,19 @@ export function renderHtml(username: string, isAdmin: boolean) {
 					<input type="checkbox" \${todo.completed ? 'checked' : ''} onchange="toggleTodo(\${todo.id}, this.checked)" />
 					<span class="todo-title">\${escapeHtml(todo.title)}</span>
 					<div class="todo-actions">
+						<button class="steps-btn" onclick="toggleSteps(\${todo.id})">步骤</button>
 						<button class="public-toggle \${todo.is_public ? 'active' : ''}" onclick="togglePublic(\${todo.id}, \${todo.is_public})">\${todo.is_public ? '公开' : '私有'}</button>
 						<button class="delete-btn" onclick="deleteTodo(\${todo.id})">删除</button>
+					</div>
+					<div class="steps-container" id="steps-\${todo.id}" style="display: none;">
+						<div class="steps-header">
+							<h4>步骤</h4>
+						</div>
+						<div class="step-add">
+							<input type="text" id="stepInput-\${todo.id}" placeholder="添加步骤..." />
+							<button onclick="addStep(\${todo.id})">添加</button>
+						</div>
+						<ul class="step-list" id="stepList-\${todo.id}"></ul>
 					</div>
 				</li>
 			\`).join("");
@@ -121,6 +147,57 @@ export function renderHtml(username: string, isAdmin: boolean) {
 		window.togglePublic = async (id, current) => {
 			await fetch("/api/todos/toggle-public", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, isPublic: !current }) });
 			fetchTodos();
+		};
+
+		window.toggleSteps = async (todoId) => {
+			const stepsContainer = document.getElementById("steps-" + todoId);
+			if (stepsContainer.style.display === "none") {
+				stepsContainer.style.display = "block";
+				await fetchSteps(todoId);
+			} else {
+				stepsContainer.style.display = "none";
+			}
+		};
+
+		async function fetchSteps(todoId) {
+			const res = await fetch("/api/todos/" + todoId + "/steps");
+			if (!res.ok) return;
+			const steps = await res.json();
+			renderSteps(todoId, steps);
+		}
+
+		function renderSteps(todoId, steps) {
+			const stepList = document.getElementById("stepList-" + todoId);
+			if (steps.length === 0) {
+				stepList.innerHTML = '<li style="color: #999; font-size: 0.875rem; padding: 0.5rem 0;">暂无步骤</li>';
+				return;
+			}
+			stepList.innerHTML = steps.map(step => \`
+				<li class="step-item \${step.completed ? 'completed' : ''}" data-id="\${step.id}">
+					<input type="checkbox" \${step.completed ? 'checked' : ''} onchange="toggleStep(\${todoId}, \${step.id}, this.checked)" />
+					<span class="step-title">\${escapeHtml(step.title)}</span>
+					<button class="step-delete" onclick="deleteStep(\${todoId}, \${step.id})">删除</button>
+				</li>
+			\`).join("");
+		}
+
+		window.addStep = async (todoId) => {
+			const input = document.getElementById("stepInput-" + todoId);
+			const title = input.value.trim();
+			if (!title) return;
+			await fetch("/api/todos/" + todoId + "/steps", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title }) });
+			input.value = "";
+			fetchSteps(todoId);
+		};
+
+		window.toggleStep = async (todoId, stepId, completed) => {
+			await fetch("/api/todos/" + todoId + "/steps/" + stepId, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ completed }) });
+			fetchSteps(todoId);
+		};
+
+		window.deleteStep = async (todoId, stepId) => {
+			await fetch("/api/todos/" + todoId + "/steps/" + stepId, { method: "DELETE" });
+			fetchSteps(todoId);
 		};
 
 		async function logout() {
