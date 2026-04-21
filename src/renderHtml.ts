@@ -642,6 +642,7 @@ export function renderAuthPage(oauthProviders: Array<{ key: string; name: string
 		.submit-btn { width: 100%; padding: 0.75rem; background: #0E838F; color: white; border: none; border-radius: 8px; font-size: 1rem; cursor: pointer; margin-top: 1rem; transition: background 0.2s; }
 		.submit-btn:hover { background: #0b6b6b; }
 		.error-msg { color: #ff4d4f; text-align: center; margin-top: 1rem; font-size: 0.875rem; display: none; }
+		.success-msg { color: #1e7e34; text-align: center; margin-top: 1rem; font-size: 0.875rem; display: none; }
 		.divider { display: flex; align-items: center; margin: 1.5rem 0; color: #999; font-size: 0.875rem; }
 		.divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: #ddd; }
 		.divider::before { margin-right: 1rem; }
@@ -651,13 +652,22 @@ export function renderAuthPage(oauthProviders: Array<{ key: string; name: string
 		.oauth-btn:hover { border-color: #0E838F; background: #f0fafa; }
 		.oauth-btn .icon { font-size: 1.2rem; }
 		.turnstile-container { margin: 1rem 0; display: flex; justify-content: center; }
+		.link-group { text-align: center; margin-top: 1rem; }
+		.link-group a { color: #0E838F; font-size: 0.875rem; text-decoration: none; margin: 0 0.5rem; }
+		.link-group a:hover { text-decoration: underline; }
+		.back-link { text-align: center; margin-top: 1rem; }
+		.back-link a { color: #666; font-size: 0.875rem; text-decoration: none; }
+		.back-link a:hover { text-decoration: underline; }
+		.hidden-section { display: none; margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid #eee; }
 	</style>
 	${turnstileScript}
 </head>
 <body>
 	<div class="auth-container">
 		<h1>待办事项</h1>
-		<p class="subtitle">登录以开始使用</p>
+		<p class="subtitle" id="authSubtitle">登录以开始使用</p>
+
+		<!-- 登录表单 -->
 		<form id="loginForm">
 			<div class="form-group">
 				<label>用户名</label>
@@ -668,30 +678,164 @@ export function renderAuthPage(oauthProviders: Array<{ key: string; name: string
 				<input type="password" id="loginPassword" required />
 			</div>
 			<button type="submit" class="submit-btn">登录</button>
+			<div class="link-group">
+				<a href="#" onclick="showRegisterForm(); return false;">注册账号</a>
+				<a href="#" onclick="showForgotForm(); return false;">忘记密码</a>
+			</div>
 		</form>
-		${oauthProviders.length > 0 ? `<div class="divider">或使用以下方式登录</div><div class="oauth-buttons">${oauthProviders.map(p => `<button class="oauth-btn" onclick="oauthLogin('${p.key}')"><span class="icon">${p.icon}</span>${p.name}</button>`).join("")}</div><div style="text-align: center; margin-top: 1.5rem;"><a href="#" onclick="showResetForm(); return false;" style="color: #0E838F; font-size: 0.875rem; text-decoration: none;">忘记密码？通过 OAuth 重置</a></div><div id="resetSection" style="display: none; margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid #eee;"><p style="text-align: center; color: #666; font-size: 0.875rem; margin-bottom: 1rem;">选择用于验证身份的 OAuth 账号</p><div class="form-group"><label>用户名</label><input type="text" id="resetUsername" placeholder="输入你的用户名" /></div><div class="turnstile-container">${turnstileWidget}</div><div id="resetOAuthButtons" class="oauth-buttons">${oauthProviders.map(p => `<button class="oauth-btn" onclick="oauthReset('${p.key}')"><span class="icon">${p.icon}</span>${p.name}</button>`).join("")}</div><p style="text-align: center; margin-top: 1rem;"><a href="#" onclick="hideResetForm(); return false;" style="color: #666; font-size: 0.875rem; text-decoration: none;">返回登录</a></p></div>` : ""}
+
+		<!-- 注册表单 -->
+		<form id="registerForm" style="display: none;">
+			<div class="form-group">
+				<label>用户名</label>
+				<input type="text" id="regUsername" required />
+			</div>
+			<div class="form-group">
+				<label>邮箱</label>
+				<input type="email" id="regEmail" required />
+			</div>
+			<div class="form-group">
+				<label>密码</label>
+				<input type="password" id="regPassword" required minlength="6" />
+			</div>
+			<div class="form-group">
+				<label>确认密码</label>
+				<input type="password" id="regConfirmPassword" required />
+			</div>
+			<button type="submit" class="submit-btn">发送验证码</button>
+			<div class="back-link">
+				<a href="#" onclick="showLoginForm(); return false;">已有账号？返回登录</a>
+			</div>
+		</form>
+
+		<!-- 注册验证码表单 -->
+		<div id="regVerifySection" class="hidden-section">
+			<p style="text-align: center; color: #666; font-size: 0.875rem; margin-bottom: 1rem;">验证码已发送至您的邮箱，请输入验证码完成注册</p>
+			<div class="form-group">
+				<label>验证码</label>
+				<input type="text" id="regCode" placeholder="6位验证码" maxlength="6" />
+			</div>
+			<button class="submit-btn" onclick="submitRegisterVerify()">完成注册</button>
+			<div class="back-link">
+				<a href="#" onclick="showRegisterForm(); return false;">返回上一步</a>
+			</div>
+		</div>
+
+		<!-- 忘记密码表单 -->
+		<div id="forgotSection" class="hidden-section">
+			<p style="text-align: center; color: #666; font-size: 0.875rem; margin-bottom: 1rem;">输入用户名，我们将发送验证码到您绑定的邮箱</p>
+			<div class="form-group">
+				<label>用户名</label>
+				<input type="text" id="forgotUsername" placeholder="输入你的用户名" />
+			</div>
+			<button class="submit-btn" onclick="sendForgotCode()">发送验证码</button>
+			<div class="back-link">
+				<a href="#" onclick="showLoginForm(); return false;">返回登录</a>
+			</div>
+		</div>
+
+		<!-- 重置密码表单 -->
+		<div id="resetCodeSection" class="hidden-section">
+			<p style="text-align: center; color: #666; font-size: 0.875rem; margin-bottom: 1rem;">输入验证码和新密码</p>
+			<div class="form-group">
+				<label>验证码</label>
+				<input type="text" id="resetCode" placeholder="6位验证码" maxlength="6" />
+			</div>
+			<div class="form-group">
+				<label>新密码</label>
+				<input type="password" id="resetNewPassword" placeholder="至少6位字符" minlength="6" />
+			</div>
+			<div class="form-group">
+				<label>确认新密码</label>
+				<input type="password" id="resetConfirmPassword" placeholder="再次输入新密码" />
+			</div>
+			<button class="submit-btn" onclick="submitResetPassword()">重置密码</button>
+			<div class="back-link">
+				<a href="#" onclick="showForgotForm(); return false;">返回上一步</a>
+			</div>
+		</div>
+
+		${oauthProviders.length > 0 ? `<div class="divider">或使用以下方式登录</div><div class="oauth-buttons">${oauthProviders.map(p => `<button class="oauth-btn" onclick="oauthLogin('${p.key}')"><span class="icon">${p.icon}</span>${p.name}</button>`).join("")}</div>` : ""}
 		<p class="error-msg" id="errorMsg"></p>
+		<p class="success-msg" id="successMsg"></p>
 	</div>
 	<script>
 		const loginForm = document.getElementById("loginForm");
+		const registerForm = document.getElementById("registerForm");
+		const regVerifySection = document.getElementById("regVerifySection");
+		const forgotSection = document.getElementById("forgotSection");
+		const resetCodeSection = document.getElementById("resetCodeSection");
 		const errorMsg = document.getElementById("errorMsg");
-		const resetSection = document.getElementById("resetSection");
+		const successMsg = document.getElementById("successMsg");
+		const authSubtitle = document.getElementById("authSubtitle");
+		let forgotUsernameCache = "";
+		let regEmailCache = "";
 
 		function showError(msg) {
 			errorMsg.textContent = msg;
 			errorMsg.style.display = "block";
+			successMsg.style.display = "none";
 		}
 
-		function showResetForm() {
-			loginForm.style.display = "none";
-			resetSection.style.display = "block";
+		function showSuccess(msg) {
+			successMsg.textContent = msg;
+			successMsg.style.display = "block";
 			errorMsg.style.display = "none";
 		}
 
-		function hideResetForm() {
+		function hideMessages() {
+			errorMsg.style.display = "none";
+			successMsg.style.display = "none";
+		}
+
+		function showLoginForm() {
 			loginForm.style.display = "block";
-			resetSection.style.display = "none";
-			errorMsg.style.display = "none";
+			registerForm.style.display = "none";
+			regVerifySection.style.display = "none";
+			forgotSection.style.display = "none";
+			resetCodeSection.style.display = "none";
+			authSubtitle.textContent = "登录以开始使用";
+			hideMessages();
+		}
+
+		function showRegisterForm() {
+			loginForm.style.display = "none";
+			registerForm.style.display = "block";
+			regVerifySection.style.display = "none";
+			forgotSection.style.display = "none";
+			resetCodeSection.style.display = "none";
+			authSubtitle.textContent = "注册新账号";
+			hideMessages();
+		}
+
+		function showRegVerifyForm() {
+			loginForm.style.display = "none";
+			registerForm.style.display = "none";
+			regVerifySection.style.display = "block";
+			forgotSection.style.display = "none";
+			resetCodeSection.style.display = "none";
+			authSubtitle.textContent = "验证邮箱";
+			hideMessages();
+		}
+
+		function showForgotForm() {
+			loginForm.style.display = "none";
+			registerForm.style.display = "none";
+			regVerifySection.style.display = "none";
+			forgotSection.style.display = "block";
+			resetCodeSection.style.display = "none";
+			authSubtitle.textContent = "重置密码";
+			hideMessages();
+		}
+
+		function showResetCodeForm() {
+			loginForm.style.display = "none";
+			registerForm.style.display = "none";
+			regVerifySection.style.display = "none";
+			forgotSection.style.display = "none";
+			resetCodeSection.style.display = "block";
+			authSubtitle.textContent = "设置新密码";
+			hideMessages();
 		}
 
 		loginForm.addEventListener("submit", async (e) => {
@@ -699,22 +843,67 @@ export function renderAuthPage(oauthProviders: Array<{ key: string; name: string
 			const res = await fetch("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: document.getElementById("loginUsername").value, password: document.getElementById("loginPassword").value }) });
 			const data = await res.json();
 			if (!res.ok) { showError(data.error); return; }
+			if (data.requireEmailBind) {
+				window.location.href = "/profile";
+				return;
+			}
 			window.location.href = "/";
 		});
 
-		function oauthLogin(provider) {
-			window.location.href = "/api/auth/oauth/authorize/" + provider;
-		}
-
-		async function oauthReset(provider) {
-			const username = document.getElementById("resetUsername").value.trim();
-			if (!username) { showError("请输入用户名"); return; }
-			${turnstileSiteKey ? `const turnstileToken = turnstile.getResponse();
-			if (!turnstileToken) { showError("请完成人机验证"); return; }` : ""}
-			const res = await fetch("/api/auth/reset-password/request", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, provider${turnstileSiteKey ? ", turnstileToken" : ""} }) });
+		registerForm.addEventListener("submit", async (e) => {
+			e.preventDefault();
+			const username = document.getElementById("regUsername").value.trim();
+			const email = document.getElementById("regEmail").value.trim();
+			const password = document.getElementById("regPassword").value;
+			const confirm = document.getElementById("regConfirmPassword").value;
+			if (!username || !password || !email) { showError("用户名、邮箱和密码不能为空"); return; }
+			if (password.length < 6) { showError("密码长度至少6位"); return; }
+			if (password !== confirm) { showError("两次输入的密码不一致"); return; }
+			const res = await fetch("/api/auth/register/send-code", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, password, email }) });
 			const data = await res.json();
 			if (!res.ok) { showError(data.error); return; }
-			window.location.href = data.redirectUrl;
+			regEmailCache = email;
+			showSuccess(data.message);
+			setTimeout(showRegVerifyForm, 1500);
+		});
+
+		window.submitRegisterVerify = async function() {
+			const code = document.getElementById("regCode").value.trim();
+			if (!code) { showError("请输入验证码"); return; }
+			const res = await fetch("/api/auth/register/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: regEmailCache, code }) });
+			const data = await res.json();
+			if (!res.ok) { showError(data.error); return; }
+			showSuccess("注册成功！请登录");
+			setTimeout(showLoginForm, 1500);
+		};
+
+		async function sendForgotCode() {
+			const username = document.getElementById("forgotUsername").value.trim();
+			if (!username) { showError("请输入用户名"); return; }
+			const res = await fetch("/api/auth/forgot-password", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username }) });
+			const data = await res.json();
+			if (!res.ok) { showError(data.error); return; }
+			forgotUsernameCache = username;
+			showSuccess(data.message);
+			setTimeout(showResetCodeForm, 1500);
+		}
+
+		async function submitResetPassword() {
+			const code = document.getElementById("resetCode").value.trim();
+			const newPassword = document.getElementById("resetNewPassword").value;
+			const confirm = document.getElementById("resetConfirmPassword").value;
+			if (!code || !newPassword) { showError("请填写完整信息"); return; }
+			if (newPassword.length < 6) { showError("密码长度至少6位"); return; }
+			if (newPassword !== confirm) { showError("两次输入的密码不一致"); return; }
+			const res = await fetch("/api/auth/reset-password-by-code", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: forgotUsernameCache, code, newPassword }) });
+			const data = await res.json();
+			if (!res.ok) { showError(data.error); return; }
+			showSuccess("密码重置成功！请登录");
+			setTimeout(showLoginForm, 1500);
+		}
+
+		function oauthLogin(provider) {
+			window.location.href = "/api/auth/oauth/authorize/" + provider;
 		}
 	</script>
 </body>
@@ -763,8 +952,20 @@ export function renderSetupPage() {
 <body>
 	<div class="setup-container">
 		<h1>初始设置</h1>
-		<p class="subtitle">配置至少一个 OAuth 登录方式，首个通过 OAuth 登录的用户将成为管理员</p>
+		<p class="subtitle">创建管理员账号或配置 OAuth 登录方式</p>
 		<form id="setupForm">
+			<div class="card" style="margin-bottom: 1.5rem; padding: 1.5rem; border: 1px solid #eee; border-radius: 8px;">
+				<h2 style="font-size: 1.1rem; margin-bottom: 1rem; color: #333;">创建管理员账号</h2>
+				<div class="form-group">
+					<label>用户名</label>
+					<input type="text" name="admin_username" placeholder="输入管理员用户名" />
+				</div>
+				<div class="form-group">
+					<label>密码</label>
+					<input type="password" name="admin_password" placeholder="至少6位字符" />
+				</div>
+			</div>
+			<div class="divider" style="margin: 1.5rem 0;">或配置 OAuth 登录（可选）</div>
 			<div class="provider-list">
 				<div class="provider-item" data-provider="github">
 					<div class="provider-header" onclick="toggleProvider(this)">
@@ -931,14 +1132,15 @@ export function renderSetupPage() {
 			}
 
 			const hasProvider = Object.keys(data).some(k => k.endsWith("_client_id"));
-			if (!hasProvider) {
-				showMsg("请至少配置一个 OAuth 提供商", "error");
+			const hasLocalAdmin = data.admin_username && data.admin_password;
+			if (!hasProvider && !hasLocalAdmin) {
+				showMsg("请创建管理员账号或配置至少一个 OAuth 提供商", "error");
 				submitBtn.disabled = false;
 				submitBtn.textContent = "保存并前往登录";
 				return;
 			}
 
-			const res = await fetch("/api/setup/configure-oauth", {
+			const res = await fetch("/api/setup", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify(data)
@@ -957,6 +1159,19 @@ export function renderSetupPage() {
 		function showMsg(text, type) {
 			msgBox.textContent = text;
 			msgBox.className = "msg " + type;
+			msgBox.style.display = "block";
+			const container = document.getElementById("toastContainer");
+			const toast = document.createElement("div");
+			toast.className = "toast " + type;
+			toast.textContent = text;
+			container.appendChild(toast);
+			requestAnimationFrame(() => {
+				toast.classList.add("show");
+			});
+			setTimeout(() => {
+				toast.classList.remove("show");
+				setTimeout(() => { toast.remove(); }, 300);
+			}, 3000);
 		}
 	</script>
 </body>
@@ -1312,9 +1527,15 @@ export function renderSettingsPage(adminUsername: string) {
 		.msg { padding: 0.75rem 1rem; border-radius: 6px; margin-top: 1rem; display: none; font-size: 0.875rem; }
 		.msg.success { display: block; background: #e6f4ea; color: #1e7e34; }
 		.msg.error { display: block; background: #fde8e8; color: #c53030; }
+		.toast-container { position: fixed; top: 1.5rem; left: 50%; transform: translateX(-50%); z-index: 2000; display: flex; flex-direction: column; gap: 0.5rem; align-items: center; pointer-events: none; }
+		.toast { padding: 0.75rem 1.25rem; border-radius: 8px; font-size: 0.875rem; color: white; box-shadow: 0 4px 12px rgba(0,0,0,0.15); opacity: 0; transform: translateY(-1rem); transition: all 0.3s ease; pointer-events: auto; max-width: 400px; text-align: center; }
+		.toast.show { opacity: 1; transform: translateY(0); }
+		.toast.success { background: #52c41a; }
+		.toast.error { background: #ff4d4f; }
 	</style>
 </head>
 <body>
+	<div class="toast-container" id="toastContainer"></div>
 	<div class="container">
 		<div class="header">
 			<h1>系统设置</h1>
@@ -1323,6 +1544,7 @@ export function renderSettingsPage(adminUsername: string) {
 				<a class="back-btn" href="/">返回待办</a>
 			</div>
 		</div>
+		<div id="msgBox" class="msg" style="display: none;"></div>
 		<div class="card">
 			<h2>注册设置</h2>
 			<div class="toggle-group">
@@ -1493,9 +1715,18 @@ export function renderSettingsPage(adminUsername: string) {
 		};
 
 		function showMsg(text, type) {
-			msgBox.textContent = text;
-			msgBox.className = "msg " + type;
-			setTimeout(() => { msgBox.className = "msg"; }, 5000);
+			const container = document.getElementById("toastContainer");
+			const toast = document.createElement("div");
+			toast.className = "toast " + type;
+			toast.textContent = text;
+			container.appendChild(toast);
+			requestAnimationFrame(() => {
+				toast.classList.add("show");
+			});
+			setTimeout(() => {
+				toast.classList.remove("show");
+				setTimeout(() => { toast.remove(); }, 300);
+			}, 3000);
 		}
 
 		loadSettings();

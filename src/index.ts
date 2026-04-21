@@ -84,8 +84,24 @@ export default {
 			});
 		}
 
-		if (path === "/api/setup/configure-oauth" && method === "POST") {
-			return handleSetupOAuth(request, env);
+		if (path === "/api/setup" && method === "POST") {
+			return handleSetup(request, env);
+		}
+
+		if (path === "/api/auth/register/send-code" && method === "POST") {
+			return handleRegisterSendCode(request, env);
+		}
+
+		if (path === "/api/auth/register/verify" && method === "POST") {
+			return handleRegisterVerify(request, env);
+		}
+
+		if (path === "/api/auth/forgot-password" && method === "POST") {
+			return handleForgotPassword(request, env);
+		}
+
+		if (path === "/api/auth/reset-password-by-code" && method === "POST") {
+			return handleResetPasswordByCode(request, env);
 		}
 
 		if (path === "/api/auth/login" && method === "POST") {
@@ -306,7 +322,7 @@ async function getUserBySession(env: Env, token: string) {
 	return row ? { id: Number(row.id), username: row.username as string, isAdmin: Number(row.is_admin) === 1 } : null;
 }
 
-async function handleSetupOAuth(request: Request, env: Env) {
+async function handleSetup(request: Request, env: Env) {
 	try {
 		const userCount = await env.DB.prepare("SELECT COUNT(*) as count FROM users").first() as Record<string, number>;
 		if ((userCount?.count ?? 0) > 0) {
@@ -314,6 +330,17 @@ async function handleSetupOAuth(request: Request, env: Env) {
 		}
 
 		const body = await request.json<Record<string, string>>();
+
+		const username = body.admin_username?.trim();
+		const password = body.admin_password?.trim();
+		if (username && password) {
+			if (password.length < 6) {
+				return jsonError("Password must be at least 6 characters", 400);
+			}
+			const passwordHash = await hashPassword(password);
+			await env.DB.prepare("INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, ?)").bind(username, passwordHash, 1).run();
+		}
+
 		const providers = ["casdoor", "github", "gitee", "cloudflare", "microsoft", "google"];
 		const extraFields: Record<string, string[]> = {
 			casdoor: ["server_url"],
@@ -341,13 +368,175 @@ async function handleSetupOAuth(request: Request, env: Env) {
 			}
 		}
 
-		if (configured === 0) {
-			return jsonError("Please configure at least one OAuth provider", 400);
+		const hasLocalAdmin = username && password;
+		if (!hasLocalAdmin && configured === 0) {
+			return jsonError("Please create an admin account or configure at least one OAuth provider", 400);
 		}
 
-		return jsonResponse({ message: `OAuth configured for ${configured} provider(s)` });
+		return jsonResponse({ message: "Setup completed" });
 	} catch (err) {
-		return jsonError("Failed to configure OAuth", 500);
+		return jsonError("Failed to setup", 500);
+	}
+}
+
+async function handleRegisterSendCode(request: Request, env: Env) {
+	try {
+		const registrationEnabled = await getSetting(env, "registration_enabled");
+		if (registrationEnabled !== "true") {
+			return jsonError("Registration is disabled", 403);
+		}
+
+		const body = await request.json<{ username: string; password: string; email: string }>();
+		if (!body.username?.trim() || !body.password?.trim() || !body.email?.trim()) {
+			return jsonError("Username, password and email are required", 400);
+		}
+		if (body.password.length < 6) {
+			return jsonError("Password must be at least 6 characters", 400);
+		}
+		if (!body.email.includes("@")) {
+			return jsonError("Invalid email address", 400);
+		}
+
+		const existingUser = await env.DB.prepare("SELECT id FROM users WHERE username = ?").bind(body.username.trim()).first();
+		if (existingUser) {
+			return jsonError("Username already exists", 409);
+		}
+		const existingEmail = await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(body.email.trim()).first();
+		if (existingEmail) {
+			return jsonError("Email already in use", 409);
+		}
+
+		const code = Math.floor(100000 + Math.random() * 900000).toString();
+		const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+		const passwordHash = await hashPassword(body.password);
+
+		await env.DB.prepare("DELETE FROM registration_verification_codes WHERE email = ?").bind(body.email.trim()).run();
+		await env.DB.prepare("INSERT INTO registration_verification_codes (email, code, username, password_hash, expires_at) VALUES (?, ?, ?, ?, ?)").bind(body.email.trim(), code, body.username.trim(), passwordHash, expiresAt).run();
+
+		const smtpHost = await getSetting(env, "smtp_host");
+		const smtpPort = await getSetting(env, "smtp_port");
+		const smtpUser = await getSetting(env, "smtp_user");
+		const smtpPass = await getSetting(env, "smtp_pass");
+		const from = await getSetting(env, "smtp_from");
+
+		if (smtpHost && smtpPort && smtpUser && smtpPass && from) {
+			const result = await sendEmail(body.email.trim(), "注册验证码", `<p>您的注册验证码是：<strong>${code}</strong></p><p>有效期10分钟。</p>`, env);
+			if (!result.success) {
+				return jsonResponse({ message: "Failed to send email", code });
+			}
+			return jsonResponse({ message: "Verification code sent to your email" });
+		}
+
+		return jsonResponse({ message: "SMTP not configured. For testing, your code is: " + code });
+	} catch (err) {
+		return jsonError("Failed to send registration code", 500);
+	}
+}
+
+async function handleRegisterVerify(request: Request, env: Env) {
+	try {
+		const registrationEnabled = await getSetting(env, "registration_enabled");
+		if (registrationEnabled !== "true") {
+			return jsonError("Registration is disabled", 403);
+		}
+
+		const body = await request.json<{ email: string; code: string }>();
+		if (!body.email?.trim() || !body.code?.trim()) {
+			return jsonError("Email and code are required", 400);
+		}
+
+		const record = await env.DB.prepare(
+			"SELECT username, password_hash FROM registration_verification_codes WHERE email = ? AND code = ? AND expires_at > datetime('now') ORDER BY created_at DESC LIMIT 1"
+		).bind(body.email.trim(), body.code.trim()).first() as Record<string, string> | null;
+
+		if (!record) {
+			return jsonError("Invalid or expired verification code", 400);
+		}
+
+		const existingUser = await env.DB.prepare("SELECT id FROM users WHERE username = ?").bind(record.username).first();
+		if (existingUser) {
+			return jsonError("Username already exists", 409);
+		}
+
+		await env.DB.prepare("INSERT INTO users (username, password_hash, email, email_verified, is_admin) VALUES (?, ?, ?, ?, ?)").bind(record.username, record.password_hash, body.email.trim(), 1, 0).run();
+		await env.DB.prepare("DELETE FROM registration_verification_codes WHERE email = ?").bind(body.email.trim()).run();
+
+		return jsonResponse({ message: "Registration successful" }, 201);
+	} catch (err) {
+		return jsonError("Failed to verify registration", 500);
+	}
+}
+
+async function handleForgotPassword(request: Request, env: Env) {
+	try {
+		const body = await request.json<{ username: string }>();
+		if (!body.username?.trim()) {
+			return jsonError("Username is required", 400);
+		}
+
+		const user = await env.DB.prepare("SELECT id, email, email_verified FROM users WHERE username = ?").bind(body.username.trim()).first() as Record<string, string | number> | null;
+		if (!user) {
+			return jsonError("User not found", 404);
+		}
+		if (!user.email || Number(user.email_verified) !== 1) {
+			return jsonError("No verified email bound to this account", 400);
+		}
+
+		const code = Math.floor(100000 + Math.random() * 900000).toString();
+		const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+		await env.DB.prepare("DELETE FROM password_reset_codes WHERE user_id = ?").bind(user.id).run();
+		await env.DB.prepare("INSERT INTO password_reset_codes (user_id, code, expires_at) VALUES (?, ?, ?)").bind(user.id, code, expiresAt).run();
+
+		const smtpHost = await getSetting(env, "smtp_host");
+		const smtpPort = await getSetting(env, "smtp_port");
+		const smtpUser = await getSetting(env, "smtp_user");
+		const smtpPass = await getSetting(env, "smtp_pass");
+		const from = await getSetting(env, "smtp_from");
+
+		if (smtpHost && smtpPort && smtpUser && smtpPass && from) {
+			const result = await sendEmail(user.email as string, "密码重置验证码", `<p>您的密码重置验证码是：<strong>${code}</strong></p><p>有效期30分钟。</p>`, env);
+			if (!result.success) {
+				return jsonResponse({ message: "Failed to send email", code });
+			}
+			return jsonResponse({ message: "Verification code sent to your email" });
+		}
+
+		return jsonResponse({ message: "SMTP not configured. For testing, your code is: " + code });
+	} catch (err) {
+		return jsonError("Failed to request password reset", 500);
+	}
+}
+
+async function handleResetPasswordByCode(request: Request, env: Env) {
+	try {
+		const body = await request.json<{ username: string; code: string; newPassword: string }>();
+		if (!body.username?.trim() || !body.code?.trim() || !body.newPassword?.trim()) {
+			return jsonError("Username, code and new password are required", 400);
+		}
+		if (body.newPassword.length < 6) {
+			return jsonError("Password must be at least 6 characters", 400);
+		}
+
+		const user = await env.DB.prepare("SELECT id FROM users WHERE username = ?").bind(body.username.trim()).first() as Record<string, number> | null;
+		if (!user) {
+			return jsonError("User not found", 404);
+		}
+
+		const record = await env.DB.prepare(
+			"SELECT id FROM password_reset_codes WHERE user_id = ? AND code = ? AND expires_at > datetime('now') ORDER BY created_at DESC LIMIT 1"
+		).bind(user.id, body.code.trim()).first() as Record<string, number> | null;
+
+		if (!record) {
+			return jsonError("Invalid or expired verification code", 400);
+		}
+
+		const newPasswordHash = await hashPassword(body.newPassword);
+		await env.DB.prepare("UPDATE users SET password_hash = ?, session_token = NULL WHERE id = ?").bind(newPasswordHash, user.id).run();
+		await env.DB.prepare("DELETE FROM password_reset_codes WHERE user_id = ?").bind(user.id).run();
+
+		return jsonResponse({ message: "Password reset successfully" });
+	} catch (err) {
+		return jsonError("Failed to reset password", 500);
 	}
 }
 
@@ -362,12 +551,10 @@ async function handleLogin(request: Request, env: Env) {
 			return jsonError("Invalid username or password", 401);
 		}
 		const emailRequired = await getSetting(env, "email_verification_required");
-		if (emailRequired === "true" && (!user.email || Number(user.email_verified) !== 1)) {
-			return jsonError("Please bind and verify your email first", 403);
-		}
+		const requireEmailBind = emailRequired === "true" && (!user.email || Number(user.email_verified) !== 1);
 		const sessionToken = generateSessionToken();
 		await env.DB.prepare("UPDATE users SET session_token = ? WHERE id = ?").bind(sessionToken, user.id).run();
-		return jsonResponse({ user: { id: Number(user.id), username: user.username, isAdmin: Number(user.is_admin) === 1 } }, 200, sessionToken);
+		return jsonResponse({ user: { id: Number(user.id), username: user.username, isAdmin: Number(user.is_admin) === 1 }, requireEmailBind }, 200, sessionToken);
 	} catch (err) {
 		return jsonError("Failed to login", 500);
 	}
