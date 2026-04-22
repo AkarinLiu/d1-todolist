@@ -1,7 +1,9 @@
 import { renderHtml, renderAuthPage, renderPublicPage, renderAdminPage, renderSettingsPage, renderProfilePage, renderSetupPage, renderPasswordResetPage } from "./renderHtml";
+import { renderMarkdown } from "./markdown";
 import { hashPassword, verifyPassword, generateSessionToken } from "./auth";
-import { sendEmail, getSetting, setSetting } from "./email";
+import { sendEmail, getSetting, setSetting, checkEmailRateLimit, recordEmailSend, getClientIP } from "./email";
 import { getOAuthConfig, getAuthorizationUrl, exchangeCodeForToken, fetchUserInfo, OAUTH_PROVIDERS, OAuthProvider } from "./oauth";
+import { Turnstile } from "@kloudflare/cloudflare-turnstile";
 
 async function getEnabledOAuthProviders(env: Env): Promise<Array<{ key: string; name: string; icon: string }>> {
 	const providers: Array<{ key: string; name: string; icon: string }> = [];
@@ -34,12 +36,14 @@ export default {
 			const hasUsers = (userCount?.count ?? 0) > 0;
 		const oauthProviders = await getEnabledOAuthProviders(env);
 		const registrationEnabled = await getSetting(env, "registration_enabled");
+		const emailVerificationRequired = await getSetting(env, "email_verification_required");
+		const turnstileSiteKey = await getSetting(env, "turnstile_site_key");
 		if (!hasUsers && oauthProviders.length === 0) {
 			return new Response(renderSetupPage(), {
 				headers: { "content-type": "text/html" },
 			});
 		}
-		return new Response(renderAuthPage(oauthProviders, env.TURNSTILE_SITE_KEY || "", registrationEnabled === "true"), {
+		return new Response(renderAuthPage(oauthProviders, turnstileSiteKey, registrationEnabled === "true", emailVerificationRequired === "true"), {
 			headers: { "content-type": "text/html" },
 		});
 		}
@@ -73,7 +77,8 @@ export default {
 			if (!user) return new Response("Unauthorized", { status: 401 });
 			const profile = await env.DB.prepare("SELECT email, email_verified, password_hash FROM users WHERE id = ?").bind(user.id).first() as Record<string, string | number> | null;
 			const hasPassword = typeof profile?.password_hash === "string" && (profile.password_hash as string).length > 0;
-			return new Response(renderProfilePage(user.username, profile?.email as string | null, Number(profile?.email_verified) === 1, hasPassword, env.TURNSTILE_SITE_KEY || ""), {
+			const turnstileSiteKey = await getSetting(env, "turnstile_site_key");
+			return new Response(renderProfilePage(user.username, profile?.email as string | null, Number(profile?.email_verified) === 1, hasPassword, turnstileSiteKey), {
 				headers: { "content-type": "text/html" },
 			});
 		}
@@ -123,13 +128,15 @@ export default {
 
 		if (path === "/reset-password" && method === "GET") {
 			const token = url.searchParams.get("token");
+			const turnstileSiteKey = await getSetting(env, "turnstile_site_key");
 			if (!token) {
 				const registrationEnabled = await getSetting(env, "registration_enabled");
-				return new Response(renderAuthPage(await getEnabledOAuthProviders(env), env.TURNSTILE_SITE_KEY || "", registrationEnabled === "true"), {
+				const emailVerificationRequired = await getSetting(env, "email_verification_required");
+				return new Response(renderAuthPage(await getEnabledOAuthProviders(env), turnstileSiteKey, registrationEnabled === "true", emailVerificationRequired === "true"), {
 					headers: { "content-type": "text/html" },
 				});
 			}
-			return new Response(renderPasswordResetPage(token, env.TURNSTILE_SITE_KEY || ""), {
+			return new Response(renderPasswordResetPage(token, turnstileSiteKey), {
 				headers: { "content-type": "text/html" },
 			});
 		}
@@ -410,6 +417,19 @@ async function handleRegisterSendCode(request: Request, env: Env) {
 			return jsonError("Email already in use", 409);
 		}
 
+		const emailVerificationRequired = await getSetting(env, "email_verification_required");
+		if (emailVerificationRequired !== "true") {
+			// 直接注册，不需要验证码
+			const passwordHash = await hashPassword(body.password);
+			await env.DB.prepare("INSERT INTO users (username, password_hash, email, email_verified, is_admin) VALUES (?, ?, ?, ?, ?)").bind(body.username.trim(), passwordHash, body.email.trim(), 0, 0).run();
+			return jsonResponse({ message: "Registration successful", skipVerification: true }, 201);
+		}
+
+		// 需要邮箱验证，发送验证码
+		const ip = getClientIP(request)
+		const rateLimitError = await checkEmailRateLimit(ip, env)
+		if (rateLimitError) return rateLimitError
+
 		const code = Math.floor(100000 + Math.random() * 900000).toString();
 		const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 		const passwordHash = await hashPassword(body.password);
@@ -428,9 +448,11 @@ async function handleRegisterSendCode(request: Request, env: Env) {
 			if (!result.success) {
 				return jsonResponse({ message: "Failed to send email", code });
 			}
+			await recordEmailSend(ip, env)
 			return jsonResponse({ message: "Verification code sent to your email" });
 		}
 
+		await recordEmailSend(ip, env)
 		return jsonResponse({ message: "SMTP not configured. For testing, your code is: " + code });
 	} catch (err) {
 		return jsonError("Failed to send registration code", 500);
@@ -473,6 +495,10 @@ async function handleRegisterVerify(request: Request, env: Env) {
 
 async function handleForgotPassword(request: Request, env: Env) {
 	try {
+		const ip = getClientIP(request)
+		const rateLimitError = await checkEmailRateLimit(ip, env)
+		if (rateLimitError) return rateLimitError
+
 		const body = await request.json<{ username: string; turnstileToken?: string }>();
 		if (!body.username?.trim()) {
 			return jsonError("Username is required", 400);
@@ -504,9 +530,11 @@ async function handleForgotPassword(request: Request, env: Env) {
 			if (!result.success) {
 				return jsonResponse({ message: "Failed to send email", code });
 			}
+			await recordEmailSend(ip, env)
 			return jsonResponse({ message: "Verification code sent to your email" });
 		}
 
+		await recordEmailSend(ip, env)
 		return jsonResponse({ message: "SMTP not configured. For testing, your code is: " + code });
 	} catch (err) {
 		return jsonError("Failed to request password reset", 500);
@@ -766,23 +794,14 @@ async function handleChangePassword(request: Request, env: Env, userId: number) 
 	}
 }
 
-async function verifyTurnstile(token: string, env: Env): Promise<boolean> {
-	const secret = env.TURNSTILE_SECRET_KEY
-	if (!secret) return true
-	const res = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ secret, response: token }),
-	})
-	const data = (await res.json()) as { success: boolean }
-	return data.success
-}
-
 async function requireTurnstile(token: string | undefined, env: Env): Promise<Response | null> {
-	if (!env.TURNSTILE_SITE_KEY || !env.TURNSTILE_SECRET_KEY) return null
+	const siteKey = await getSetting(env, "turnstile_site_key")
+	const secretKey = await getSetting(env, "turnstile_secret_key")
+	if (!siteKey || !secretKey) return null
 	if (!token) return jsonError("请完成人机验证", 400)
-	const verified = await verifyTurnstile(token, env)
-	if (!verified) return jsonError("人机验证失败", 400)
+	const turnstile = new Turnstile({ secret: secretKey })
+	const result = await turnstile.verify({ response: token })
+	if (!result.success) return jsonError("人机验证失败", 400)
 	return null
 }
 
@@ -879,7 +898,7 @@ function escapeHtml(text: string): string {
 
 async function handleGetTodos(env: Env, userId: number, searchParams: URLSearchParams) {
 	try {
-		let query = "SELECT id, title, completed, is_public, created_at FROM todos WHERE owner_id = ?";
+		let query = "SELECT id, title, completed, is_public, notes, created_at FROM todos WHERE owner_id = ?";
 		const bindings: (string | number)[] = [userId];
 
 		const tagId = searchParams.get("tag_id");
@@ -901,7 +920,8 @@ async function handleGetTodos(env: Env, userId: number, searchParams: URLSearchP
 
 		const todosWithTags = await Promise.all(todos.map(async (todo) => {
 			const { results: tags } = await env.DB.prepare("SELECT t.id, t.name, t.color, t.group_id FROM tags t JOIN todo_tags tt ON t.id = tt.tag_id WHERE tt.todo_id = ?").bind(todo.id).all();
-			return { ...todo, tags };
+			const notesHtml = todo.notes ? renderMarkdown(todo.notes as string) : "";
+			return { ...todo, tags, notes_html: notesHtml };
 		}));
 
 		return jsonResponse(todosWithTags);
@@ -912,12 +932,14 @@ async function handleGetTodos(env: Env, userId: number, searchParams: URLSearchP
 
 async function handleCreateTodo(request: Request, env: Env, userId: number) {
 	try {
-		const body = await request.json<{ title: string }>();
+		const body = await request.json<{ title: string; notes?: string }>();
 		if (!body.title?.trim()) {
 			return jsonError("Title is required", 400);
 		}
-		const result = await env.DB.prepare("INSERT INTO todos (title, owner_id) VALUES (?, ?) RETURNING id, title, completed, is_public, created_at").bind(body.title.trim(), userId).first();
-		return jsonResponse(result, 201);
+		const notes = body.notes?.trim() || null;
+		const result = await env.DB.prepare("INSERT INTO todos (title, owner_id, notes) VALUES (?, ?, ?) RETURNING id, title, completed, is_public, notes, created_at").bind(body.title.trim(), userId, notes).first();
+		const notesHtml = result?.notes ? renderMarkdown(result.notes as string) : "";
+		return jsonResponse({ ...result, notes_html: notesHtml }, 201);
 	} catch (err) {
 		return jsonError("Failed to create todo", 500);
 	}
@@ -925,15 +947,18 @@ async function handleCreateTodo(request: Request, env: Env, userId: number) {
 
 async function handleUpdateTodo(request: Request, env: Env, userId: number, id: number) {
 	try {
-		const body = await request.json<{ title?: string; completed?: boolean }>();
+		const body = await request.json<{ title?: string; completed?: boolean; notes?: string }>();
 		const todo = await env.DB.prepare("SELECT * FROM todos WHERE id = ? AND owner_id = ?").bind(id, userId).first();
 		if (!todo) {
 			return jsonError("Todo not found", 404);
 		}
-		const newTitle = body.title ?? (todo as Record<string, unknown>).title;
-		const newCompleted = body.completed !== undefined ? (body.completed ? 1 : 0) : (todo as Record<string, unknown>).completed;
-		const updated = await env.DB.prepare("UPDATE todos SET title = ?, completed = ? WHERE id = ? AND owner_id = ? RETURNING id, title, completed, is_public, created_at").bind(newTitle, newCompleted, id, userId).first();
-		return jsonResponse(updated);
+		const existing = todo as Record<string, unknown>;
+		const newTitle = body.title !== undefined ? body.title.trim() : existing.title;
+		const newCompleted = body.completed !== undefined ? (body.completed ? 1 : 0) : existing.completed;
+		const newNotes = body.notes !== undefined ? (body.notes.trim() || null) : existing.notes;
+		const updated = await env.DB.prepare("UPDATE todos SET title = ?, completed = ?, notes = ? WHERE id = ? AND owner_id = ? RETURNING id, title, completed, is_public, notes, created_at").bind(newTitle, newCompleted, newNotes, id, userId).first();
+		const notesHtml = updated?.notes ? renderMarkdown(updated.notes as string) : "";
+		return jsonResponse({ ...updated, notes_html: notesHtml });
 	} catch (err) {
 		return jsonError("Failed to update todo", 500);
 	}
@@ -972,10 +997,11 @@ async function handleGetPublicTodos(env: Env, username: string) {
 		if (!user) {
 			return jsonError("User not found", 404);
 		}
-		const { results } = await env.DB.prepare("SELECT id, title, completed, created_at FROM todos WHERE owner_id = ? AND is_public = 1 ORDER BY created_at DESC").bind(user.id).all();
+		const { results } = await env.DB.prepare("SELECT id, title, completed, notes, created_at FROM todos WHERE owner_id = ? AND is_public = 1 ORDER BY created_at DESC").bind(user.id).all();
 		const todosWithSteps = await Promise.all((results as Array<Record<string, unknown>>).map(async (todo) => {
 			const { results: steps } = await env.DB.prepare("SELECT id, title, completed, sort_order FROM todo_steps WHERE todo_id = ? ORDER BY sort_order ASC, created_at ASC").bind(todo.id).all();
-			return { ...todo, steps };
+			const notesHtml = todo.notes ? renderMarkdown(todo.notes as string) : "";
+			return { ...todo, steps, notes_html: notesHtml };
 		}));
 		return jsonResponse({ username: user.username, todos: todosWithSteps });
 	} catch (err) {
@@ -1142,15 +1168,20 @@ async function handleGetSettings(env: Env) {
 		const casdoorExtraFields = ["server_url"];
 		const microsoftExtraFields = ["tenant"];
 
-		const settings: Record<string, string> = {
-			registration_enabled: await getSetting(env, "registration_enabled"),
-			email_verification_required: await getSetting(env, "email_verification_required"),
-			smtp_host: await getSetting(env, "smtp_host"),
-			smtp_port: await getSetting(env, "smtp_port"),
-			smtp_user: await getSetting(env, "smtp_user"),
-			smtp_from: await getSetting(env, "smtp_from"),
-			test_email_recipient: await getSetting(env, "test_email_recipient"),
-		};
+	const settings: Record<string, string> = {
+		registration_enabled: await getSetting(env, "registration_enabled"),
+		email_verification_required: await getSetting(env, "email_verification_required"),
+		email_rate_limit_max: await getSetting(env, "email_rate_limit_max"),
+		email_rate_limit_window: await getSetting(env, "email_rate_limit_window"),
+		email_rate_limit_cooldown: await getSetting(env, "email_rate_limit_cooldown"),
+		smtp_host: await getSetting(env, "smtp_host"),
+		smtp_port: await getSetting(env, "smtp_port"),
+		smtp_user: await getSetting(env, "smtp_user"),
+		smtp_from: await getSetting(env, "smtp_from"),
+		test_email_recipient: await getSetting(env, "test_email_recipient"),
+		turnstile_site_key: await getSetting(env, "turnstile_site_key"),
+		turnstile_secret_key: await getSetting(env, "turnstile_secret_key"),
+	};
 
 		for (const provider of oauthProviders) {
 			for (const field of [...oauthFields, ...(provider === "casdoor" ? casdoorExtraFields : []), ...(provider === "microsoft" ? microsoftExtraFields : [])]) {
@@ -1174,7 +1205,9 @@ async function handleUpdateSettings(request: Request, env: Env) {
 
 		const allowedKeys = [
 			"registration_enabled", "email_verification_required",
+			"email_rate_limit_max", "email_rate_limit_window", "email_rate_limit_cooldown",
 			"smtp_host", "smtp_port", "smtp_user", "smtp_pass", "smtp_from", "test_email_recipient",
+			"turnstile_site_key", "turnstile_secret_key",
 		];
 
 		for (const provider of oauthProviders) {
@@ -1196,6 +1229,10 @@ async function handleUpdateSettings(request: Request, env: Env) {
 
 async function handleTestSmtp(request: Request, env: Env) {
 	try {
+		const ip = getClientIP(request)
+		const rateLimitError = await checkEmailRateLimit(ip, env)
+		if (rateLimitError) return rateLimitError
+
 		const smtpHost = await getSetting(env, "smtp_host");
 		const smtpPort = await getSetting(env, "smtp_port");
 		const smtpUser = await getSetting(env, "smtp_user");
@@ -1216,6 +1253,7 @@ async function handleTestSmtp(request: Request, env: Env) {
 		if (!result.success) {
 			return jsonError(result.error || "Failed to send test email", 500);
 		}
+		await recordEmailSend(ip, env)
 		return jsonResponse({ message: `Test email sent to ${to}` });
 	} catch (err) {
 		return jsonError("Failed to test email", 500);
@@ -1224,6 +1262,10 @@ async function handleTestSmtp(request: Request, env: Env) {
 
 async function handleSendEmailCode(request: Request, env: Env, userId: number) {
 	try {
+		const ip = getClientIP(request)
+		const rateLimitError = await checkEmailRateLimit(ip, env)
+		if (rateLimitError) return rateLimitError
+
 		const body = await request.json<{ email: string; turnstileToken?: string }>();
 		const turnstileError = await requireTurnstile(body.turnstileToken, env);
 		if (turnstileError) return turnstileError;
@@ -1248,8 +1290,10 @@ async function handleSendEmailCode(request: Request, env: Env, userId: number) {
 			if (!result.success) {
 				return jsonError(result.error || "Failed to send email", 500);
 			}
+			await recordEmailSend(ip, env)
 			return jsonResponse({ message: "Verification code sent to your email" });
 		}
+		await recordEmailSend(ip, env)
 		return jsonResponse({ message: "SMTP not configured. For testing, your code is: " + code });
 	} catch (err) {
 		return jsonError("Failed to send verification code", 500);

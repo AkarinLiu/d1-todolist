@@ -29,6 +29,8 @@
 		"seedLocalD1": "wrangler d1 migrations apply DB --local"
 	},
 	"dependencies": {
+		"@kloudflare/cloudflare-turnstile": "^0.1.0",
+		"bulma": "^1.0.4",
 		"worker-mailer": "^1.2.1"
 	}
 }

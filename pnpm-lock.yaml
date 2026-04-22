@@ -8,6 +8,12 @@ importers:
 
   .:
     dependencies:
+      '@kloudflare/cloudflare-turnstile':
+        specifier: ^0.1.0
+        version: 0.1.0
+      bulma:
+        specifier: ^1.0.4
+        version: 1.0.4
       worker-mailer:
         specifier: ^1.2.1
         version: 1.2.1
@@ -354,6 +360,9 @@ packages:
   '@jridgewell/trace-mapping@0.3.9':
     resolution: {integrity: sha512-3Belt6tdc8bPgAtbcmdtNJlirVoTmEb5e2gC94PnkwEW9jI6CAHUeoG85tjWP5WquqfavoMtMwiG4P926ZKKuQ==}
 
+  '@kloudflare/cloudflare-turnstile@0.1.0':
+    resolution: {integrity: sha512-DOplemjoSM4zPDgtHnRCblqGLpueVCuLzskZJXJ1/E+XLDXU58E70jblIkzGeMRhtJVwA3XyxxJcGM46jPzYYA==}
+
   '@poppinss/colors@4.1.6':
     resolution: {integrity: sha512-H9xkIdFswbS8n1d6vmRd8+c10t2Qe+rZITbbDHHkQixH5+2x1FDGmi/0K+WgWiqQFKPSlIYB7jlH6Kpfn6Fleg==}
 
@@ -381,6 +390,9 @@ packages:
 
   blake3-wasm@2.1.5:
     resolution: {integrity: sha512-F1+K8EbfOZE49dtoPtmxUQrpXaBIl3ICvasLh+nJta0xkz+9kF/7uet9fLnwKqhDrmj6g+6K3Tw9yQPUg2ka5g==}
+
+  bulma@1.0.4:
+    resolution: {integrity: sha512-Ffb6YGXDiZYX3cqvSbHWqQ8+LkX6tVoTcZuVB3lm93sbAVXlO0D6QlOTMnV6g18gILpAXqkG2z9hf9z4hCjz2g==}
 
   color-convert@2.0.1:
     resolution: {integrity: sha512-RRECPsj7iu/xb5oKYcsFHSppFNnsj/52OVTRKb4zP5onXwVF3zVmmToNcOfGC+CRDpfK/U584fMg38ZHCaElKQ==}
@@ -719,6 +731,8 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
 
+  '@kloudflare/cloudflare-turnstile@0.1.0': {}
+
   '@poppinss/colors@4.1.6':
     dependencies:
       kleur: 4.1.5
@@ -740,6 +754,8 @@ snapshots:
   acorn@8.14.0: {}
 
   blake3-wasm@2.1.5: {}
+
+  bulma@1.0.4: {}
 
   color-convert@2.0.1:
     dependencies:
